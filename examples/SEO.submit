@@ -1,0 +1,15 @@
+#!/bin/sh
+
+#SBATCH --job-name=01         #the name of your submit
+#SBATCH --mail-user=               #your email adress
+#SBATCH --mail-type=ALL            #mail type, when info you: NONE, BEGIN, END, FAIL, REQUEUE, ALL
+#SBATCH --partition=public            #the partition of cluster
+#SBATCH --time=7-00:00:00#7 days   #the maximum of runnig time
+#SBATCH --output=./run_%j.out      #the logfile name
+#SBATCH --nodes=1                  #how many nodes you are going to use
+#SBATCH --ntasks-per-node=12        #how many tasks you will execute on each node
+#SBATCH --exclusive
+export OMPI_MCA_btl=^openib
+date
+mpirun -n 4 python main_SEO.py -j config_SEO.json
+date
