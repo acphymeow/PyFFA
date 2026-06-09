@@ -1,0 +1,58 @@
+{
+  "Bmap": {
+    "B0_T": 9.623383637031798e-09,
+    "B0_max_T": 1.65,
+    "Bmean": null,
+    "NSector": 16,
+    "R0_m": 12.0,
+    "SpiralAngle_deg": 49.973388,
+    "Type": "SCALE",
+    "coefficients_tupel": [
+      9.623383637031798e-09,
+      7.630003
+    ],
+    "fringe_width_1": [
+      0,
+      1.17,
+      0,
+      1.17,
+      0
+    ],
+    "interval_1": [
+      0.25,
+      0.2625911111111111,
+      0.10611333333333334,
+      0.13129555555555555,
+      0.25
+    ],
+    "k_value": 7.630003,
+    "orbital_freq_MHz": 4.5,
+    "positive_or_negative_1": [
+      0,
+      1.0,
+      0,
+      -0.465074,
+      0
+    ],
+    "r_axis": null,
+    "rmin_max_step_m": [
+      10.8,
+      12.2,
+      0.001
+    ],
+    "theta_step_rad": 8.726646259971648e-05
+  },
+  "BzInfo": {
+    "IsoCoef": null,
+    "IsoError": null
+  },
+  "config": {
+    "date": 1774580017.7876687,
+    "expand_order": 2,
+    "folder": "../Bmaps/Bmap_FD16"
+  },
+  "machine": {
+    "energy_ext": 600,
+    "energy_inj": 300
+  }
+}
