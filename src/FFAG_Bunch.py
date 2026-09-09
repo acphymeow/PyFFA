@@ -13,11 +13,14 @@ pyfftw.config.NUM_THREADS = 1
 from mpi4py import MPI
 from FFAG_SC_new import (divide_arc2, merge_multiple_arcs, DistributeCharge2D_Njit, GetLocalCoordinates_2p5,
                          ComputeSliceBoundsAndCoords_merged, make_fft_kernel_open_numba, total_field_1d_numba,
-                         compute_field_from_potential_numba,interpolate_fields_to_particles_numba,
+                         compute_field_from_potential_numba, interpolate_fields_to_particles_SBS_numba_withEfi,
                          DistributeChargeSBS_Njit, ComputeSliceBoundsAndCoordsSBS_merged, compute_field_from_potential_numba_SBS,
-                         interpolate_fields_to_particles_SBS_numba, allgatherv_phi_3d, allgatherv_phi_3d_inplace, contiguous_block_for_rank, GetLocalCoordinates_2p5_rk)
+                         interpolate_fields_to_particles_SBS_numba, allgatherv_phi_3d, allgatherv_phi_3d_inplace,
+                         contiguous_block_for_rank, GetLocalCoordinates_2p5_rk,compute_local_coordinates_from_projection,
+                         compute_local_coordinates_from_projection_at_energy,
+                         make_s_continuous_mpi, ComputeSliceBoundsAndCoordsSBS_merged_s)
 from FFAG_MathTools import UpdataPreStepNjit, Bilinear_interp_2D_vect_uniform
-
+from numba import njit, prange
 
 
 class FFAG_ManageBunchAttribute:
@@ -192,6 +195,14 @@ class FFAG_Bunch:
         self.Malloc_SC_interp_flag = np.zeros(self.TotalParticleNum_Local, )
         self.Malloc_SC_x = np.zeros(self.TotalParticleNum_Local, )
 
+        self.Malloc_SC_r0_phi = np.zeros(self.TotalParticleNum_Local, )
+        self.Malloc_SC_pr0_phi = np.zeros(self.TotalParticleNum_Local, )
+        self.Malloc_SC_s_phi = np.zeros(self.TotalParticleNum_Local, )
+        self.Malloc_SC_r0_star = np.zeros(self.TotalParticleNum_Local, )
+        self.Malloc_SC_pr0_star = np.zeros(self.TotalParticleNum_Local, )
+        self.Malloc_SC_s_star = np.zeros(self.TotalParticleNum_Local, )
+        self.Malloc_SC_theta_star = np.zeros(self.TotalParticleNum_Local, )
+
         self.Malloc_SC_fiMod = np.zeros(self.TotalParticleNum_Local, )
         self.Malloc_SC_surviveIDX = np.zeros(self.TotalParticleNum_Local, dtype=np.int32)
         self.Malloc_SC_fiMod_arc = np.zeros(self.TotalParticleNum_Local, )
@@ -217,7 +228,6 @@ class FFAG_Bunch:
 
         self.Malloc_SC_survive_flag_PrePre = np.zeros(self.TotalParticleNum_Local, dtype=bool)
         self.Malloc_SC_survive_flag_Pre = np.zeros(self.TotalParticleNum_Local, dtype=bool)
-
 
         self.Malloc_RK_dxdt = np.zeros((self.TotalParticleNum_Local, 16))
 
@@ -259,6 +269,8 @@ class FFAG_Bunch:
         self.SEO_r_matrix = None
         self.SEO_pr_matrix = None
         self.SEO_perimeter = None
+        self.SEO_s_matrix = None
+        self.SEO_pr0_geom_matrix = None
 
 
     # @profile
@@ -963,202 +975,12 @@ class FFAG_Bunch:
 
 
     # @profile
-    def Build_2_5D_SliceGrid(self, fft_fwd_1, fft_inv_1):
-        """
-        基于 (x, y, z) 进行 φ slice 划分，并在 (x, z) 平面上构建 2D 电荷网格。
-        使用 DistributeCharge2D_Njit 进行加权电荷分配。支持多线程并行合并
-        """
-        comm = MPI.COMM_WORLD
-        rank = comm.Get_rank()
-        size = comm.Get_size()
-
-        segments = self.f_grid_size
-        nx = self.x_grid_size
-        nz = self.z_grid_size
-
-        SEO_fi_axis = self.SEO_fi_axis
-        SEO_Ek_axis = self.SEO_Ek_axis
-        SEO_r_matrix = self.SEO_r_matrix
-        SEO_perimeter = self.SEO_perimeter
-
-        # 1. 获取当前线程存活粒子的极坐标, coords_mean_gamma是预生成的全为1的数组
-        (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma, coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5(self.LocalBunch,
-                                                                                          self.Step_SurviveFlag,
-                                                                                          self.Malloc_SC_r,
-                                                                                          self.Malloc_SC_fi,
-                                                                                          self.Malloc_SC_z,
-                                                                                          self.Malloc_SC_gamma,self.Malloc_SC_mean_gamma_interp,
-                                                                                          self.Malloc_SC_fiMod, self.Malloc_SC_surviveIDX, self.speed_c)
-
-        # 2. 当前线程的 φ 覆盖范围
-        arc_start_local, arc_end_local, _ = divide_arc2(coords_fi_mod)
-        # print(f"arc_start_local: {arc_start_local}, arc_end_local: {arc_end_local}, rank: {rank}")
-        # 3. 所有线程收集 arcs
-        local_arc = np.array([arc_start_local, arc_end_local])
-        all_arcs = np.zeros((size, 2))
-        comm.Allgather(local_arc, all_arcs)
-        arcs_list = [tuple(row) for row in all_arcs]
-        # 4. 全局 φ 范围合并
-        fi_s_global, fi_e_global = merge_multiple_arcs(arcs_list)
-        if fi_e_global <= fi_s_global:
-            fi_e_global += 2 * np.pi
-        # 5. φ 方向均匀划分
-        slice_fi_step = (fi_e_global - fi_s_global) / (segments-1)
-        fi_grid = np.linspace(fi_s_global, fi_e_global, segments)
-        # print(f"fi_s_global: {fi_s_global}, fi_e_global: {fi_e_global}, arclist={arcs_list}")
-
-        # MPI 汇总
-        sum_gamma_global = comm.allreduce(sum_gamma_local, op=MPI.SUM)
-        count_global = comm.allreduce(survive_num, op=MPI.SUM)
-
-        if count_global > 0:
-            mean_gamma_global = sum_gamma_global / count_global - 1.0
-        else:
-            mean_gamma_global = 0.0
-
-        # 9. 根据平均gamma对应的SEO,
-        coords_r0, _ = Bilinear_interp_2D_vect_uniform(SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0],
-                                                       len(SEO_Ek_axis),
-                                                       SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0],
-                                                       len(SEO_fi_axis),
-                                                       SEO_r_matrix,
-                                                       # coords_mean_gamma * mean_gamma_global * self.E0_rest_MeV,
-                                                       (coords_gamma-1) * self.E0_rest_MeV,
-                                                       coords_fi_mod,
-                                                       self.Malloc_SC_r_SEO, self.Malloc_SC_interp_flag)
-
-        # print("coords_r0=", [coords_r0[0], coords_r0[1000], coords_r0[2000]], "Ek=", mean_gamma_global * self.E0_rest_MeV )
-
-        # 将r转换为x, 然后计算xz的统计量，再计算xz平均值和sigma, 再将fi转换为s
-        (coords_x, r_slices, z_slices, count_slices, slice_indices,
-         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = (
-            ComputeSliceBoundsAndCoords_merged(coords_r, coords_z, coords_fi_mod, coords_r0,
-                                               self.Malloc_SC_x,
-                                               slice_fi_step, fi_s_global, segments,
-                                               self.Malloc_SC_slice_r2d, self.Malloc_SC_slice_z2d,
-                                               self.Malloc_SC_slice_indices))
-
-        # 6. 粒子分配到 φ slice（考虑跨越 2π）
-        # 7. 每 slice 分别计算局部 rmin/rmax/zmin/zmax
-
-        # MPI gather 缓存，改为 numpy 数组
-        sum_x_global = np.zeros(1, dtype=np.float64)
-        sum_z_global = np.zeros(1, dtype=np.float64)
-        sum_x2_global = np.zeros(1, dtype=np.float64)
-        sum_z2_global = np.zeros(1, dtype=np.float64)
-        count_slices_global = np.zeros_like(count_slices)
-
-        # Allreduce
-        comm.Allreduce(np.array([sum_x_local,]), sum_x_global, op=MPI.SUM)
-        comm.Allreduce(np.array([sum_z_local,]), sum_z_global, op=MPI.SUM)
-        comm.Allreduce(np.array([sum_x2_local,]), sum_x2_global, op=MPI.SUM)
-        comm.Allreduce(np.array([sum_z2_local,]), sum_z2_global, op=MPI.SUM)
-        comm.Allreduce(count_slices, count_slices_global, op=MPI.SUM)
-
-        if count_global > 0:
-            global_mean_x = np.sum(sum_x_global) / count_global
-            global_mean_z = np.sum(sum_z_global) / count_global
-
-            global_var_x = np.sum(sum_x2_global) / count_global - global_mean_x ** 2
-            global_var_z = np.sum(sum_z2_global) / count_global - global_mean_z ** 2
-
-            global_sigma_x = np.sqrt(max(global_var_x, 0.0))
-            global_sigma_z = np.sqrt(max(global_var_z, 0.0))
-        else:
-            global_mean_x = global_mean_z = global_sigma_x = global_sigma_z = 0.0
-
-        # 获取束长
-        SEO_perimeter_MeanGamma = np.interp(mean_gamma_global * self.E0_rest_MeV, SEO_Ek_axis, SEO_perimeter)
-        BunchLength = SEO_perimeter_MeanGamma  * (fi_e_global - fi_s_global)/ np.pi / 2.0
-        s_grid = fi_grid/np.pi/2.0*SEO_perimeter_MeanGamma
-        # coords_x, phi_times_R, BunchLength = coordinate_convert_SC(coords_r, mean_r_global, fi_s_global, fi_e_global, segments, slice_indices)
-        scale = self.sigma_ratio
-        # scale=20
-        # print(f"BunchLength: {BunchLength}")
-
-        # 每个slice、local粒子的边界
-        global_xmin = global_mean_x - scale * global_sigma_x
-        global_xmax = global_mean_x + scale * global_sigma_x
-        global_zmin = global_mean_z - scale * global_sigma_z
-        global_zmax = global_mean_z + scale * global_sigma_z
-        # # 所有slices、local粒子的边界
-        # local_xmin = np.min(x_min_slices)
-        # local_xmax = np.max(x_max_slices)
-        # local_zmin = np.min(z_min_slices)
-        # local_zmax = np.max(z_max_slices)
-        # # 所有slices、global粒子的边界
-        # global_xmin = comm.allreduce(local_xmin, op=MPI.MIN)
-        # global_xmax = comm.allreduce(local_xmax, op=MPI.MAX)
-        # global_zmin = comm.allreduce(local_zmin, op=MPI.MIN)
-        # global_zmax = comm.allreduce(local_zmax, op=MPI.MAX)
-
-        # 9. 生成一个x-z的mesh网格，然后分配当前线程的电荷到网格点上，形成二维xz电荷分布和一维纵向分布rho_f
-        q_part = self.marcosize * self.q_charge
-        rho_xz = DistributeCharge2D_Njit(coords_x, coords_z, q_part,
-                                                        BunchLength, global_xmin, global_xmax,
-                                                        global_zmin, global_zmax, nx, nz)
-
-        rho_f = count_slices_global * q_part
-
-        # 10. 各进程进行通信，汇总加和各子束团的slice_charge_maps, 得到全局的rho_xz, rho_f,
-        # 汇总各 slice 电荷密度网格
-        comm.Allreduce(MPI.IN_PLACE, rho_xz, op=MPI.SUM)
-        comm.Allreduce(MPI.IN_PLACE, rho_f, op=MPI.SUM)
-
-        # ========================
-        # # 11. 计算每个 φ‑slice 的二维电势分布 φ[nz, nx]
-        # #    开放边界：零填充 2× 网格 → 频域卷积 → 裁剪
-        # 用 FFTW 代替 scipy.fft
-        # ========================
-
-        dx = (global_xmax - global_xmin) / nx
-        dz = (global_zmax - global_zmin) / nz
-        if dx == 0.0 or dz == 0.0 or BunchLength <= 0.0:
-            # slice_phi_maps2.append(np.zeros((nz, nx), dtype=np.float32))
-            phi_pad = np.zeros((nz, nx), dtype=np.float32)
-        else:
-            # 1) 计算频域卷积核 (numpy float32, nz*nx)
-            fft_kernel = make_fft_kernel_open_numba(nx, nz, dx, dz)
-            # 2) FFT plan
-            buf = fft_fwd_1.input_array  # complex64, shape=(nz,nx)
-            buf.real[:] = rho_xz.astype(np.float32)  # 实部填ρ, 虚部0
-            buf.imag[:] = 0.0
-            # 3) 前向 FFTW
-            fft_fwd_1()  # b_buf = FFT(a_buf)
-            # 4) 频域乘核
-            out = fft_fwd_1.output_array
-            out *= fft_kernel
-            # 5) 反向 FFTW
-            fft_inv_1()  # a_buf = IFFT(b_buf)
-            # 6) 裁剪并存回列表
-            phi_pad = fft_inv_1.output_array.real
-
-        Ef_map = total_field_1d_numba(s_grid, rho_f)
-
-        # ================================================
-        # 12/13: 从 slice_phi_maps2 计算当前线程所有粒子的 Ex, Ez
-        # ================================================
-        # 初始化输出：与 coords_r 一一对应
-        # print(f"gamma-1={mean_gamma_global}")
-        Ex_map, Ez_map = compute_field_from_potential_numba(phi_pad, dx, dz, BunchLength, self.Malloc_SC_Exmap, self.Malloc_SC_Ezmap, mean_gamma_global)
-
-        interpolate_fields_to_particles_numba(
-            Ex_map, Ez_map, Ef_map,
-            coords_x, coords_z, slice_indices,
-            coords_survive_idx,
-            global_xmin, global_zmin, dx, dz,BunchLength,
-            self.Malloc_SC_Ex_p, self.Malloc_SC_Ez_p, self.Malloc_SC_Ef_p,
-            self.LocalBunch
-        )
-
-        return rho_xz, phi_pad, Ex_map, Ez_map, global_xmin, global_xmax, global_zmin, global_zmax, BunchLength, Ef_map, s_grid, rho_f, coords_r, coords_fi, coords_x, coords_r0, coords_z, fi_grid
-
-    # @profile
     def Build_2_5D_SliceGrid_sbs(self, fft_fwd_1, fft_inv_1):
         """
         基于 (x, y, z) 进行 φ slice 划分，并在 (x, z) 平面上构建 2D 电荷网格, slice by slice版本。
         使用 DistributeCharge2D_Njit 进行加权电荷分配。支持多线程并行合并
         """
+
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()
         size = comm.Get_size()
@@ -1351,13 +1173,289 @@ class FFAG_Bunch:
 
         return rho_xz_slices_, phi_cube, Ex_cube, Ez_cube, global_xmin, global_xmax, global_zmin, global_zmax, BunchLength, Ef_map, s_grid, rho_f, coords_r, coords_fi, coords_x, coords_r0, coords_z, fi_grid
 
-
-    def Build_2_5D_SliceGrid_sbs_benchmark(self, fft_fwd_1, fft_inv_1, USE_SEO=True, SEO_USE_R=10.0):
+    # @profile
+    def Build_2_5D_SliceGrid_sbs_new(self, fft_fwd_pad, fft_inv_pad):
         """
-        #兼容无SEO情况, 主要用于benchmark, 跟踪未使用#
         基于 (x, y, z) 进行 φ slice 划分，并在 (x, z) 平面上构建 2D 电荷网格, slice by slice版本。
-        使用 DistributeCharge2D_Njit 进行加权电荷分配。支持多线程并行合并
+        横向 Poisson 求解改为：
+            开放边界二维 Green 函数 + zero-padding + pyFFTW 卷积
+        保持原返回值与插值回写接口不变。
+
+        说明：
+        1) fft_fwd_pad / fft_inv_pad 是外部创建并复用的 padded FFT plan。
+        2) 纵向场 Ef_map 仍沿用你原来的 total_field_1d_numba 逻辑，不动。
         """
+
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+
+        ns = self.f_grid_size
+        nx = self.x_grid_size
+        nz = self.z_grid_size
+
+        SEO_fi_axis = self.SEO_fi_axis
+        SEO_Ek_axis = self.SEO_Ek_axis
+        SEO_r_matrix = self.SEO_r_matrix
+        SEO_pr_matrix = self.SEO_pr_matrix  # pr/pfi
+        SEO_perimeter = self.SEO_perimeter
+
+        # 1. 获取当前线程存活粒子的极坐标, coords_mean_gamma是预生成的全为1的数组
+        if self.BunchType == "Boris":
+            (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
+             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5(
+                self.LocalBunch,
+                self.Step_SurviveFlag,
+                self.Malloc_SC_r,
+                self.Malloc_SC_fi,
+                self.Malloc_SC_z,
+                self.Malloc_SC_gamma,
+                self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod,
+                self.Malloc_SC_surviveIDX,
+                self.speed_c
+            )
+        elif self.BunchType == "RK4":
+            (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
+             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5_rk(
+                self.LocalBunch,
+                self.Step_SurviveFlag,
+                self.Malloc_SC_r,
+                self.Malloc_SC_fi,
+                self.Malloc_SC_z,
+                self.Malloc_SC_gamma,
+                self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod,
+                self.Malloc_SC_surviveIDX,
+                self.speed_c
+            )
+        else:
+            raise RuntimeError("BunchType must be Boris or RK4")
+
+        # 2. 当前线程的 φ 覆盖范围
+        arc_start_local, arc_end_local, _ = divide_arc2(coords_fi_mod)
+
+        # 3. 所有线程收集 arcs
+        local_arc = np.array([arc_start_local, arc_end_local])
+        all_arcs = np.zeros((size, 2))
+        comm.Allgather(local_arc, all_arcs)
+        arcs_list = [tuple(row) for row in all_arcs]
+
+        # 4. 全局 φ 范围合并
+        fi_s_global, fi_e_global = merge_multiple_arcs(arcs_list)
+        if fi_e_global <= fi_s_global:
+            fi_e_global += 2.0 * np.pi
+
+        # 5. φ 方向均匀划分
+        slice_fi_step = (fi_e_global - fi_s_global) / (ns - 1)
+        fi_grid = np.linspace(fi_s_global, fi_e_global, ns)
+
+        # MPI 汇总
+        sum_gamma_global = comm.allreduce(sum_gamma_local, op=MPI.SUM)
+        count_global = comm.allreduce(survive_num, op=MPI.SUM)
+
+        if count_global > 0:
+            mean_gamma_global = sum_gamma_global / count_global - 1.0
+        else:
+            mean_gamma_global = 0.0
+
+        # 6. 根据粒子能量/方位插值 SEO r
+        coords_r0, _ = Bilinear_interp_2D_vect_uniform(
+            SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
+            SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
+            SEO_r_matrix,(coords_gamma - 1.0) * self.E0_rest_MeV,
+            coords_fi_mod,
+            self.Malloc_SC_r_SEO,
+            self.Malloc_SC_interp_flag
+        )
+
+        # 7. 插值 SEO pr
+        coords_pr0, _ = Bilinear_interp_2D_vect_uniform(
+            SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
+            SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
+            SEO_pr_matrix,(coords_gamma - 1.0) * self.E0_rest_MeV,
+            coords_fi_mod,
+            self.Malloc_SC_pr_SEO,
+            self.Malloc_SC_interp_flag
+        )
+
+        # 8. 将 r 转为 x，切片并统计
+        (coords_x, r_slices, z_slices, x_slices, count_slices, slice_indices,
+         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = ComputeSliceBoundsAndCoordsSBS_merged(
+            coords_r, coords_z, coords_fi_mod, coords_r0,
+            self.Malloc_SC_x,
+            slice_fi_step, fi_s_global, ns,
+            self.Malloc_SC_slice_r2d, self.Malloc_SC_slice_z2d,
+            self.Malloc_SC_slice_x2d,
+            self.Malloc_SC_slice_indices
+        )
+
+        # 9. 汇总全局统计量
+        sum_x_global = np.zeros(1, dtype=np.float64)
+        sum_z_global = np.zeros(1, dtype=np.float64)
+        sum_x2_global = np.zeros(1, dtype=np.float64)
+        sum_z2_global = np.zeros(1, dtype=np.float64)
+        count_slices_global = np.zeros_like(count_slices)
+
+        comm.Allreduce(np.array([sum_x_local]), sum_x_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z_local]), sum_z_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_x2_local]), sum_x2_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z2_local]), sum_z2_global, op=MPI.SUM)
+        comm.Allreduce(count_slices, count_slices_global, op=MPI.SUM)
+
+        if count_global > 1:
+            global_mean_x = np.sum(sum_x_global) / count_global
+            global_mean_z = np.sum(sum_z_global) / count_global
+
+            global_var_x = np.sum(sum_x2_global) / count_global - global_mean_x ** 2
+            global_var_z = np.sum(sum_z2_global) / count_global - global_mean_z ** 2
+
+            global_sigma_x = np.sqrt(max(global_var_x, 0.0))
+            global_sigma_z = np.sqrt(max(global_var_z, 0.0))
+        else:
+            global_mean_x = 0.0
+            global_mean_z = 0.0
+            global_sigma_x = 0.0
+            global_sigma_z = 0.0
+
+        # 10. 获取束长
+        SEO_perimeter_MeanGamma = np.interp(mean_gamma_global * self.E0_rest_MeV,
+                                            SEO_Ek_axis, SEO_perimeter)
+        BunchLength = SEO_perimeter_MeanGamma * (fi_e_global - fi_s_global) / (2.0 * np.pi)
+        s_grid = fi_grid / (2.0 * np.pi) * SEO_perimeter_MeanGamma
+
+        scale = self.sigma_ratio
+        global_xmin = global_mean_x - scale * global_sigma_x
+        global_xmax = global_mean_x + scale * global_sigma_x
+        global_zmin = global_mean_z - scale * global_sigma_z
+        global_zmax = global_mean_z + scale * global_sigma_z
+
+        # 11. 沉积当前线程电荷到各个 slice 的 (x,z) 网格
+        q_part = self.marcosize * self.q_charge
+
+        rho_xz_slices_ = DistributeChargeSBS_Njit(
+            z_slices, x_slices, count_slices,
+            q_part, BunchLength,
+            global_xmin, global_xmax,
+            global_zmin, global_zmax,
+            nx, nz, ns
+        )
+
+        # 1D 纵向电荷
+        rho_f = count_slices_global * q_part
+
+        # ===== 12. per-slice 2D 开放边界卷积 =====
+        dx = (global_xmax - global_xmin) / nx
+        dz = (global_zmax - global_zmin) / nz
+
+        if dx <= 0.0 or dz <= 0.0:
+            self.Malloc_SC_Ex_p[:] = 0.0
+            self.Malloc_SC_Ez_p[:] = 0.0
+            self.Malloc_SC_Ef_p[:] = 0.0
+
+            Ef_map = np.zeros((ns,), dtype=np.float32)
+            Ex_cube = np.zeros((ns, nz, nx), dtype=np.float32)
+            Ez_cube = np.zeros((ns, nz, nx), dtype=np.float32)
+            phi_cube = np.zeros((ns, nz, nx), dtype=np.float32)
+        else:
+            # 12.1 汇总全局 rho_xz_slices_
+            rho_f_global = rho_f.copy()
+            comm.Allreduce(MPI.IN_PLACE, rho_xz_slices_, op=MPI.SUM)
+
+            # 12.2 纵向场仍沿用原逻辑
+            Ef_map = total_field_1d_numba(s_grid, rho_f_global)
+
+            Ex_cube = np.zeros((ns, nz, nx), dtype=np.float32)
+            Ez_cube = np.zeros((ns, nz, nx), dtype=np.float32)
+            phi_cube = np.zeros((ns, nz, nx), dtype=np.float32)
+
+            # 12.3 用当前 dx/dz 生成本次 SC 调用的开放边界 kernel
+            kernel_pad = make_realspace_log_kernel_padded_numba(nx, nz, dx, dz)
+            a_buf = fft_fwd_pad.input_array
+            a_buf.real[:] = kernel_pad
+            a_buf.imag[:] = 0.0
+            fft_fwd_pad()
+            kernel_hat = fft_fwd_pad.output_array.copy()
+
+            # 12.4 逐个 slice 做 zero-pad 开放边界卷积
+            for k in range(ns):
+                # 输入缓冲
+                a_buf = fft_fwd_pad.input_array  # complex64, (2*nz, 2*nx)
+                a_buf.real[:] = 0.0
+                a_buf.imag[:] = 0.0
+
+                # 将原 rho 放入左上角，其余为 0
+                a_buf.real[:nz, :nx] = rho_xz_slices_[k]
+
+                # FFT(rho_pad)
+                fft_fwd_pad()
+                rho_hat = fft_fwd_pad.output_array
+
+                # phi_hat = rho_hat * kernel_hat * (dx * dz)
+                b_buf = fft_inv_pad.input_array
+                b_buf[:] = rho_hat * kernel_hat * np.float32(dx * dz)
+
+                # IFFT -> phi_pad
+                fft_inv_pad()
+                phi_pad = fft_inv_pad.output_array.real
+
+                # 截取原物理区域
+                phi_k = phi_pad[:nz, :nx].copy().astype(np.float32)
+
+                # 从 phi 求 Ex, Ez（沿用你原来的 numba 函数）
+                compute_field_from_potential_numba_SBS(
+                    phi_k, k, dx, dz, BunchLength,
+                    Ex_cube, Ez_cube, mean_gamma_global
+                )
+
+                phi_cube[k] = phi_k
+
+            # 12.5 统一把场插值回本地粒子
+            interpolate_fields_to_particles_SBS_numba(
+                Ex_cube, Ez_cube, Ef_map,
+                coords_x, coords_z, coords_pr0, slice_indices, coords_survive_idx,
+                global_xmin, global_zmin, dx, dz, BunchLength,
+                self.Malloc_SC_Ex_p, self.Malloc_SC_Ez_p, self.Malloc_SC_Ef_p,
+                self.LocalBunch
+            )
+
+        return (
+            rho_xz_slices_,
+            phi_cube,
+            Ex_cube,
+            Ez_cube,
+            global_xmin,
+            global_xmax,
+            global_zmin,
+            global_zmax,
+            BunchLength,
+            Ef_map,
+            s_grid,
+            rho_f,
+            coords_r,
+            coords_fi,
+            coords_x,
+            coords_r0,
+            coords_z,
+            fi_grid
+        )
+
+    def Build_2_5D_SliceGrid_sbs_new_fixProjection(self, fft_fwd_pad, fft_inv_pad):
+        """
+        基于 (x, y, z) 进行 s slice 划分，并在 (x, z) 平面上构建 2D 电荷网格, slice by slice 版本。
+        横向 Poisson 求解改为：
+            开放边界二维 Green 函数 + zero-padding + pyFFTW 卷积
+        保持原返回值与插值回写接口不变。
+
+        说明
+        ----
+        1) fft_fwd_pad / fft_inv_pad 是外部创建并复用的 padded FFT plan。
+        2) 纵向场 Ef_map 仍沿用原来的 total_field_1d_numba 逻辑，不动。
+        3) 纵向主坐标改为：
+               coords_s_mod  ->  s_cont_local
+           即先由 SEO_s_matrix 得到单圈 s，再用统一参考周长 C_ref 做周期连续化。
+        """
+
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()
         size = comm.Get_size()
@@ -1371,80 +1469,207 @@ class FFAG_Bunch:
         SEO_r_matrix = self.SEO_r_matrix
         SEO_perimeter = self.SEO_perimeter
 
-        # 1. 获取当前线程存活粒子的极坐标, coords_mean_gamma是预生成的全为1的数组
-        (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma, coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5(self.LocalBunch,
-                                                                                          self.Step_SurviveFlag,
-                                                                                          self.Malloc_SC_r,
-                                                                                          self.Malloc_SC_fi,
-                                                                                          self.Malloc_SC_z,
-                                                                                          self.Malloc_SC_gamma,self.Malloc_SC_mean_gamma_interp,
-                                                                                          self.Malloc_SC_fiMod, self.Malloc_SC_surviveIDX, self.speed_c)
+        # ------------------------------------------------------------------
+        # 1. 获取当前 rank 存活粒子的极坐标
+        #    coords_mean_gamma 是预生成的数组，后续接口兼容保留
+        # ------------------------------------------------------------------
+        if self.BunchType == "Boris":
+            (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
+             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5(
+                self.LocalBunch,
+                self.Step_SurviveFlag,
+                self.Malloc_SC_r,
+                self.Malloc_SC_fi,
+                self.Malloc_SC_z,
+                self.Malloc_SC_gamma,
+                self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod,
+                self.Malloc_SC_surviveIDX,
+                self.speed_c
+            )
+        elif self.BunchType == "RK4":
+            (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
+             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5_rk(
+                self.LocalBunch,
+                self.Step_SurviveFlag,
+                self.Malloc_SC_r,
+                self.Malloc_SC_fi,
+                self.Malloc_SC_z,
+                self.Malloc_SC_gamma,
+                self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod,
+                self.Malloc_SC_surviveIDX,
+                self.speed_c
+            )
+        else:
+            raise RuntimeError("BunchType must be Boris or RK4")
 
-        # 2. 当前线程的 φ 覆盖范围
-        arc_start_local, arc_end_local, _ = divide_arc2(coords_fi_mod)
-        # 3. 所有线程收集 arcs
-        local_arc = np.array([arc_start_local, arc_end_local])
-        all_arcs = np.zeros((size, 2))
-        comm.Allgather(local_arc, all_arcs)
-        arcs_list = [tuple(row) for row in all_arcs]
-        # 4. 全局 φ 范围合并
-        fi_s_global, fi_e_global = merge_multiple_arcs(arcs_list)
-        if fi_e_global <= fi_s_global:
-            fi_e_global += 2 * np.pi
-        # 5. φ 方向均匀划分
-        slice_fi_step = (fi_e_global - fi_s_global) / (ns-1)
-        fi_grid = np.linspace(fi_s_global, fi_e_global, ns)
-
-        # MPI 汇总
+        # ------------------------------------------------------------------
+        # 2. 用新的投影几何，统一得到 theta* / x / s_mod / pr0 / r0
+        # ------------------------------------------------------------------
+        # Use one bunch-mean reference orbit to construct the common
+        # longitudinal coordinate used for continuous unwrapping and slicing.
         sum_gamma_global = comm.allreduce(sum_gamma_local, op=MPI.SUM)
         count_global = comm.allreduce(survive_num, op=MPI.SUM)
-
         if count_global > 0:
-            mean_gamma_global = sum_gamma_global / count_global - 1.0
+            mean_gamma_global = sum_gamma_global / count_global
+            mean_gamma_minus_1_global = mean_gamma_global - 1.0
+            mean_Ek_global = mean_gamma_minus_1_global * self.E0_rest_MeV
+            mean_Ek_ref = np.clip(mean_Ek_global, SEO_Ek_axis[0], SEO_Ek_axis[-1])
+            C_ref = np.interp(mean_Ek_ref, SEO_Ek_axis, SEO_perimeter)
         else:
-            mean_gamma_global = 0.0
+            mean_gamma_global = 1.0
+            mean_gamma_minus_1_global = 0.0
+            mean_Ek_global = 0.0
+            mean_Ek_ref = SEO_Ek_axis[0]
+            C_ref = SEO_perimeter[0]
 
-        # 9. 根据平均gamma对应的SEO,
-        if USE_SEO:
-            coords_r0, _ = Bilinear_interp_2D_vect_uniform(SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0],
-                                                           len(SEO_Ek_axis),
-                                                           SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0],
-                                                           len(SEO_fi_axis),
-                                                           SEO_r_matrix,
-                                                           # coords_mean_gamma * mean_gamma_global * self.E0_rest_MeV,
-                                                           (coords_gamma-1) * self.E0_rest_MeV,
-                                                           coords_fi_mod,
-                                                           self.Malloc_SC_r_SEO, self.Malloc_SC_interp_flag)
-        else:
-            coords_r0 = np.ones_like(coords_fi_mod)*SEO_USE_R
-        # 将r转换为x, 然后计算xz的统计量，再计算xz平均值和sigma,
-        pass
+        ek_query_common = coords_mean_gamma * mean_Ek_ref
+        (coords_theta_star, coords_x, coords_s_mod, coords_z, coords_pr0, coords_r0,
+         coords_r0_phi, coords_pr0_phi, coords_s_phi) = compute_local_coordinates_from_projection_at_energy(
+            SEO_Ek_axis,
+            SEO_fi_axis,
+            SEO_r_matrix,
+            self.SEO_pr0_geom_matrix,  # 几何方向比表，不是原始 pr = vr / v
+            self.SEO_s_matrix,
+            coords_r,
+            coords_fi_mod,
+            coords_z,
+            ek_query_common,
+            self.Malloc_SC_r0_phi,
+            self.Malloc_SC_pr0_phi,
+            self.Malloc_SC_s_phi,
+            self.Malloc_SC_r0_star,
+            self.Malloc_SC_pr0_star,
+            self.Malloc_SC_s_star,
+            self.Malloc_SC_theta_star,
+            self.Malloc_SC_x,
+            self.Malloc_SC_interp_flag
+        )
+
+        # ------------------------------------------------------------------
+        # 3. 先做全局平均 gamma，得到 s 连续化所需的统一参考周长 C_ref
+        # ------------------------------------------------------------------
+        if count_global <= 0:
+            # 无存活粒子时，给一个稳妥参考值，避免插值语义含糊
+            C_ref = SEO_perimeter[0]
+
+        # ------------------------------------------------------------------
+        # 4. 对周期纵向坐标 coords_s_mod 做 MPI 连续化
+        #    输出：
+        #      s_cont_local : 本 rank 的连续纵向坐标
+        #      arc_start    : 全局连续区间起点
+        #      arc_end      : 全局连续区间终点
+        #      arc_len      : 全局连续区间长度
+        #      best_shift   : 最优展开 shift
+        # ------------------------------------------------------------------
+        s_cont_local, arc_start, arc_end, arc_len, best_shift = \
+            make_s_continuous_mpi(coords_s_mod, C_ref, comm)
+
+        # ------------------------------------------------------------------
+        # 5. 用连续纵向坐标构造统一纵向网格
+        # ------------------------------------------------------------------
+        BunchLength = arc_len
+        slice_s_step = BunchLength / (ns - 1) if ns > 1 else 0.0
+        s_grid = np.linspace(arc_start, arc_end, ns)
+
+        # ------------------------------------------------------------------
+        # 6. 按连续纵向坐标 s_cont_local 分 slice
+        # ------------------------------------------------------------------
         (coords_x, r_slices, z_slices, x_slices, count_slices, slice_indices,
-         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = (
-            ComputeSliceBoundsAndCoordsSBS_merged(coords_r, coords_z, coords_fi_mod, coords_r0,
-                                               self.Malloc_SC_x,
-                                               slice_fi_step, fi_s_global, ns,
-                                               self.Malloc_SC_slice_r2d, self.Malloc_SC_slice_z2d,
-                                                  self.Malloc_SC_slice_x2d,
-                                               self.Malloc_SC_slice_indices))
+         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = ComputeSliceBoundsAndCoordsSBS_merged_s(
+            coords_r,
+            coords_z,
+            s_cont_local,
+            coords_x,
+            slice_s_step,
+            arc_start,
+            ns,
+            self.Malloc_SC_slice_r2d,
+            self.Malloc_SC_slice_z2d,
+            self.Malloc_SC_slice_x2d,
+            self.Malloc_SC_slice_indices
+        )
 
-        # 6. 粒子分配到 φ slice（考虑跨越 2π）
-        # 7. 每 slice 分别计算局部 rmin/rmax/zmin/zmax
-        # MPI gather 缓存，改为 numpy 数组
+        # Compute the MPI-global mean kinetic energy of each longitudinal
+        # slice.  All particles in one slice then share the corresponding
+        # energy-dependent closed-orbit tangent frame.
+        slice_gamma_sum_local = np.bincount(
+            slice_indices, weights=coords_gamma, minlength=ns
+        ).astype(np.float64)
+        slice_count_local = np.bincount(
+            slice_indices, minlength=ns
+        ).astype(np.int64)
+        slice_gamma_sum_global = np.zeros(ns, dtype=np.float64)
+        slice_count_global_for_ref = np.zeros(ns, dtype=np.int64)
+        comm.Allreduce(slice_gamma_sum_local, slice_gamma_sum_global, op=MPI.SUM)
+        comm.Allreduce(slice_count_local, slice_count_global_for_ref, op=MPI.SUM)
+
+        slice_mean_gamma = np.full(ns, mean_gamma_global, dtype=np.float64)
+        occupied_slices = slice_count_global_for_ref > 0
+        slice_mean_gamma[occupied_slices] = (
+            slice_gamma_sum_global[occupied_slices]
+            / slice_count_global_for_ref[occupied_slices]
+        )
+        slice_mean_Ek = (slice_mean_gamma - 1.0) * self.E0_rest_MeV
+        slice_mean_Ek = np.clip(slice_mean_Ek, SEO_Ek_axis[0], SEO_Ek_axis[-1])
+        ek_query_slice = slice_mean_Ek[slice_indices]
+
+        (coords_theta_star, coords_x, coords_s_slice_ref, coords_z, coords_pr0, coords_r0,
+         coords_r0_phi, coords_pr0_phi, coords_s_phi) = compute_local_coordinates_from_projection_at_energy(
+            SEO_Ek_axis,
+            SEO_fi_axis,
+            SEO_r_matrix,
+            self.SEO_pr0_geom_matrix,
+            self.SEO_s_matrix,
+            coords_r,
+            coords_fi_mod,
+            coords_z,
+            ek_query_slice,
+            self.Malloc_SC_r0_phi,
+            self.Malloc_SC_pr0_phi,
+            self.Malloc_SC_s_phi,
+            self.Malloc_SC_r0_star,
+            self.Malloc_SC_pr0_star,
+            self.Malloc_SC_s_star,
+            self.Malloc_SC_theta_star,
+            self.Malloc_SC_x,
+            self.Malloc_SC_interp_flag
+        )
+
+        # Keep the first-pass longitudinal grid and slice indices fixed, but
+        # rebuild transverse slice arrays/statistics in the final frame.
+        (coords_x, r_slices, z_slices, x_slices, count_slices, slice_indices,
+         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = ComputeSliceBoundsAndCoordsSBS_merged_s(
+            coords_r,
+            coords_z,
+            s_cont_local,
+            coords_x,
+            slice_s_step,
+            arc_start,
+            ns,
+            self.Malloc_SC_slice_r2d,
+            self.Malloc_SC_slice_z2d,
+            self.Malloc_SC_slice_x2d,
+            self.Malloc_SC_slice_indices
+        )
+
+        # ------------------------------------------------------------------
+        # 7. 汇总全局统计量
+        # ------------------------------------------------------------------
         sum_x_global = np.zeros(1, dtype=np.float64)
         sum_z_global = np.zeros(1, dtype=np.float64)
         sum_x2_global = np.zeros(1, dtype=np.float64)
         sum_z2_global = np.zeros(1, dtype=np.float64)
         count_slices_global = np.zeros_like(count_slices)
 
-        # Allreduce
-        comm.Allreduce(np.array([sum_x_local,]), sum_x_global, op=MPI.SUM)
-        comm.Allreduce(np.array([sum_z_local,]), sum_z_global, op=MPI.SUM)
-        comm.Allreduce(np.array([sum_x2_local,]), sum_x2_global, op=MPI.SUM)
-        comm.Allreduce(np.array([sum_z2_local,]), sum_z2_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_x_local]), sum_x_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z_local]), sum_z_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_x2_local]), sum_x2_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z2_local]), sum_z2_global, op=MPI.SUM)
         comm.Allreduce(count_slices, count_slices_global, op=MPI.SUM)
 
-        if count_global > 0:
+        if count_global > 1:
             global_mean_x = np.sum(sum_x_global) / count_global
             global_mean_z = np.sum(sum_z_global) / count_global
 
@@ -1454,80 +1679,151 @@ class FFAG_Bunch:
             global_sigma_x = np.sqrt(max(global_var_x, 0.0))
             global_sigma_z = np.sqrt(max(global_var_z, 0.0))
         else:
-            global_mean_x = global_mean_z = global_sigma_x = global_sigma_z = 0.0
+            global_mean_x = 0.0
+            global_mean_z = 0.0
+            global_sigma_x = 0.0
+            global_sigma_z = 0.0
 
-        # 获取束长
-        if USE_SEO:
-            SEO_perimeter_MeanGamma = np.interp(mean_gamma_global * self.E0_rest_MeV, SEO_Ek_axis, SEO_perimeter)
-        else:
-            SEO_perimeter_MeanGamma = np.pi*2*SEO_USE_R
-        BunchLength = SEO_perimeter_MeanGamma  * (fi_e_global - fi_s_global)/ np.pi / 2.0
-        s_grid = fi_grid/np.pi/2.0*SEO_perimeter_MeanGamma
         scale = self.sigma_ratio
-
-        # 每个slice、local粒子的边界
         global_xmin = global_mean_x - scale * global_sigma_x
         global_xmax = global_mean_x + scale * global_sigma_x
         global_zmin = global_mean_z - scale * global_sigma_z
         global_zmax = global_mean_z + scale * global_sigma_z
 
-        # 9. 生成一个x-z的mesh网格，然后分配当前线程的电荷到网格点上，形成二维xz电荷分布和一维纵向分布rho_f
+        # ------------------------------------------------------------------
+        # 8. 沉积当前 rank 电荷到各个 slice 的 (x, z) 网格
+        # ------------------------------------------------------------------
         q_part = self.marcosize * self.q_charge
 
-        rho_xz_slices_ = DistributeChargeSBS_Njit(z_slices, x_slices, count_slices, q_part,
-                                                        BunchLength, global_xmin, global_xmax,
-                                                        global_zmin, global_zmax, nx, nz, ns)
+        rho_xz_slices_ = DistributeChargeSBS_Njit(
+            z_slices,
+            x_slices,
+            count_slices,
+            q_part,
+            BunchLength,
+            global_xmin,
+            global_xmax,
+            global_zmin,
+            global_zmax,
+            nx,
+            nz,
+            ns
+        )
 
-        rho_f = count_slices_global * q_part
+        # 1D 纵向电荷（这里 count_slices_global 已是全局量）
+        rho_s = count_slices_global * q_part
 
-        # ===== 11. per-slice 2D 卷积（owner-compute，最后 Allreduce 立方）=====
+        # ------------------------------------------------------------------
+        # 9. per-slice 2D 开放边界卷积
+        # ------------------------------------------------------------------
         dx = (global_xmax - global_xmin) / nx
         dz = (global_zmax - global_zmin) / nz
+
         if dx <= 0.0 or dz <= 0.0:
-            # 无场：直接清零并返回/继续
             self.Malloc_SC_Ex_p[:] = 0.0
             self.Malloc_SC_Ez_p[:] = 0.0
+            self.Malloc_SC_Ef_p[:] = 0.0
 
-            Ef_map = np.zeros((ns,))
-            Ex_cube = np.zeros((ns, nz, nx), dtype=np.float32)  # 本进程持有的立方 非owner的 slice 行保持0
+            Ef_map = np.zeros((ns,), dtype=np.float32)
+            Ex_cube = np.zeros((ns, nz, nx), dtype=np.float32)
             Ez_cube = np.zeros((ns, nz, nx), dtype=np.float32)
             phi_cube = np.zeros((ns, nz, nx), dtype=np.float32)
+
         else:
-            # 1) 频域核 / 纵向场 / 3D 立方, np.float32
-            fft_kernel = make_fft_kernel_open_numba(nx, nz, dx, dz)
-            # rho_f 建议用全局值（如前面未Allreduce，这里补一次）
-            rho_f_global = rho_f.copy()
-            comm.Allreduce(MPI.IN_PLACE, rho_f_global, op=MPI.SUM)
+            # 9.1 汇总全局 rho_xz_slices_
             comm.Allreduce(MPI.IN_PLACE, rho_xz_slices_, op=MPI.SUM)
 
-            Ef_map = total_field_1d_numba(s_grid, rho_f_global)
-            Ex_cube = np.zeros((ns, nz, nx), dtype=np.float32)  # 本进程持有的立方 非owner的 slice 行保持0
+            # 9.2 纵向场仍沿用原逻辑
+            Ef_map = total_field_1d_numba(s_grid, rho_s)
+
+            Ex_cube = np.zeros((ns, nz, nx), dtype=np.float32)
             Ez_cube = np.zeros((ns, nz, nx), dtype=np.float32)
             phi_cube = np.zeros((ns, nz, nx), dtype=np.float32)
 
+            # 9.3 用当前 dx/dz 生成本次 SC 调用的开放边界 kernel
+            kernel_pad = make_realspace_log_kernel_padded_numba(nx, nz, dx, dz)
+            a_buf = fft_fwd_pad.input_array
+            a_buf.real[:] = kernel_pad
+            a_buf.imag[:] = 0.0
+            fft_fwd_pad()
+            kernel_hat = fft_fwd_pad.output_array.copy()
+
+            # 9.4 逐个 slice 做 zero-pad 开放边界卷积
             for k in range(ns):
-                buf = fft_fwd_1.input_array  # complex64, (nz, nx)
-                buf.real[:] = rho_xz_slices_[k]
-                buf.imag[:] = 0.0
-                fft_fwd_1()
-                out = fft_fwd_1.output_array
-                out *= fft_kernel
-                fft_inv_1()
-                phi_k = fft_inv_1.output_array.real  # float32
+                # 输入缓冲
+                a_buf = fft_fwd_pad.input_array  # complex64, (2*nz, 2*nx)
+                a_buf.real[:] = 0.0
+                a_buf.imag[:] = 0.0
+
+                # 将原 rho 放入左上角，其余为 0
+                a_buf.real[:nz, :nx] = rho_xz_slices_[k]
+
+                # FFT(rho_pad)
+                fft_fwd_pad()
+                rho_hat = fft_fwd_pad.output_array
+
+                # phi_hat = rho_hat * kernel_hat * (dx * dz)
+                b_buf = fft_inv_pad.input_array
+                b_buf[:] = rho_hat * kernel_hat * np.float32(dx * dz)
+
+                # IFFT -> phi_pad
+                fft_inv_pad()
+                phi_pad = fft_inv_pad.output_array.real
+
+                # 截取原物理区域
+                phi_k = phi_pad[:nz, :nx].copy().astype(np.float32)
+
+                # 从 phi 求 Ex, Ez
+                # 注意：这里最后一个参数沿用你当前写法。
+                # 若 compute_field_from_potential_numba_SBS 内部需要的是 gamma 而不是 gamma-1，
+                # 这里应改成 mean_gamma_minus_1_global + 1.0
                 compute_field_from_potential_numba_SBS(
-                    phi_k, k, dx, dz, BunchLength,
-                    Ex_cube, Ez_cube, mean_gamma_global)
+                    phi_k,
+                    k,
+                    dx,
+                    dz,
+                    BunchLength,
+                    Ex_cube,
+                    Ez_cube,
+                    mean_gamma_minus_1_global
+                )
 
                 phi_cube[k] = phi_k
 
-            # 5) 统一把场插值回本地粒子, 仅处理本地有粒子的片
-            interpolate_fields_to_particles_SBS_numba(
-                Ex_cube, Ez_cube, Ef_map,
-                coords_x, coords_z, slice_indices, coords_survive_idx,
-                global_xmin, global_zmin, dx, dz, BunchLength,
-                self.Malloc_SC_Ex_p, self.Malloc_SC_Ez_p, self.Malloc_SC_Ef_p, self.LocalBunch)
+            # 9.5 统一把场插值回本地粒子
+            interpolate_fields_to_particles_SBS_numba_withEfi(
+                Ex_cube,Ez_cube,Ef_map,
+                coords_x,coords_z,coords_pr0,
+                slice_indices,
+                coords_survive_idx,
+                global_xmin,global_zmin,dx,dz,
+                BunchLength,
+                self.Malloc_SC_Ex_p,
+                self.Malloc_SC_Ez_p,
+                self.Malloc_SC_Ef_p,
+                self.LocalBunch)
 
-        return rho_xz_slices_, phi_cube, Ex_cube, Ez_cube, global_xmin, global_xmax, global_zmin, global_zmax, BunchLength, Ef_map, s_grid, rho_f, coords_r, coords_fi, coords_x, coords_r0, coords_z, fi_grid
+        return (
+            rho_xz_slices_,
+            phi_cube,
+            Ex_cube,
+            Ez_cube,
+            global_xmin,
+            global_xmax,
+            global_zmin,
+            global_zmax,
+            BunchLength,
+            Ef_map,
+            s_grid,
+            rho_s,
+            coords_r,
+            coords_fi,
+            coords_x,
+            coords_r0,
+            coords_z,
+            None
+        )
+
 
 
     # @profile
@@ -1716,11 +2012,35 @@ class FFAG_Bunch:
         return rho_xz_slices_, phi_cube, Ex_cube, Ez_cube, global_xmin, global_xmax, global_zmin, global_zmax, BunchLength, Ef_map, s_grid, rho_f, coords_r, coords_fi, coords_x, coords_r0, coords_z, fi_grid
 
 
-    def Build_2_5D_SliceGrid_sbs_LinearFast(self, fft_fwd_1, fft_inv_1):
+    def Build_2_5D_SliceGrid_sbs_GaussianToy_uniformL(self, fft_fwd_1=None, fft_inv_1=None):
         """
-        最简版：保留 slice 划分 + 纵向电荷统计 + 线性(KV-like)空间电荷力
-        去掉 PIC：不做 2D 网格沉积、不做 FFT Poisson、不做网格插值
-        只直接给粒子 Ex/Ez（线性力）+ Ef（1D 纵向场）
+        Gaussian toy-model space-charge solver.
+
+        保留：
+            1. 存活粒子坐标读取
+            2. phi 范围合并
+            3. SEO 闭轨插值
+            4. 局部横向坐标 x 构造
+            5. slice 划分
+            6. 解析 Gaussian 横向空间电荷场
+            7. 回填 LocalBunch[:,10:13]
+
+        横向场模型：
+            E_x = lambda/(2*pi*eps0*x) * [1 - exp(-x^2/(2*sigma_x^2))]
+            E_z = lambda/(2*pi*eps0*z) * [1 - exp(-z^2/(2*sigma_z^2))]
+
+        近轴：
+            E_x -> lambda/(4*pi*eps0*sigma_x^2) * x
+            E_z -> lambda/(4*pi*eps0*sigma_z^2) * z
+
+        推荐参数：
+            self.sigma_x_gauss = 0.03
+            self.sigma_z_gauss = 0.03
+            self.sigma_s_gauss = 2.0
+            self.N_total_gauss = 1.0e12
+            self.gaussian_longitudinal = True
+            self.use_gamma2_reduction = True
+            self.gaussian_keep_longitudinal_field = False
         """
 
         comm = MPI.COMM_WORLD
@@ -1734,170 +2054,192 @@ class FFAG_Bunch:
         SEO_fi_axis = self.SEO_fi_axis
         SEO_Ek_axis = self.SEO_Ek_axis
         SEO_r_matrix = self.SEO_r_matrix
-        SEO_pr_matrix = self.SEO_pr_matrix #pr/pfi
+        SEO_pr_matrix = self.SEO_pr_matrix
         SEO_perimeter = self.SEO_perimeter
 
-        # 1) 本地存活粒子坐标（极坐标）
+        # 1) 本地存活粒子坐标
         if self.BunchType == "Boris":
             (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
-             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5(self.LocalBunch,
-                                                                                                        self.Step_SurviveFlag,
-                                                                                                        self.Malloc_SC_r,
-                                                                                                        self.Malloc_SC_fi,
-                                                                                                        self.Malloc_SC_z,
-                                                                                                        self.Malloc_SC_gamma,
-                                                                                                        self.Malloc_SC_mean_gamma_interp,
-                                                                                                        self.Malloc_SC_fiMod,
-                                                                                                        self.Malloc_SC_surviveIDX,
-                                                                                                        self.speed_c)
+             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5(
+                self.LocalBunch, self.Step_SurviveFlag, self.Malloc_SC_r, self.Malloc_SC_fi,
+                self.Malloc_SC_z, self.Malloc_SC_gamma, self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod, self.Malloc_SC_surviveIDX, self.speed_c)
         elif self.BunchType == "RK4":
             (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
              coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5_rk(
-                self.LocalBunch,
-                self.Step_SurviveFlag,
-                self.Malloc_SC_r,
-                self.Malloc_SC_fi,
-                self.Malloc_SC_z,
-                self.Malloc_SC_gamma,
-                self.Malloc_SC_mean_gamma_interp,
-                self.Malloc_SC_fiMod,
-                self.Malloc_SC_surviveIDX,
-                self.speed_c)
+                self.LocalBunch, self.Step_SurviveFlag, self.Malloc_SC_r, self.Malloc_SC_fi,
+                self.Malloc_SC_z, self.Malloc_SC_gamma, self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod, self.Malloc_SC_surviveIDX, self.speed_c)
         else:
-            raise ("BunchType must be Boris or RK4")
+            raise ValueError("BunchType must be Boris or RK4")
 
-        # 2) 本地 φ 覆盖范围 -> 全局 φ 范围
+        if survive_num <= 0:
+            self.Malloc_SC_Ex_p[:] = 0.0
+            self.Malloc_SC_Ez_p[:] = 0.0
+            self.Malloc_SC_Ef_p[:] = 0.0
+            rho_xz_slices_ = phi_cube = Ex_cube = Ez_cube = None
+            global_xmin = global_xmax = global_zmin = global_zmax = BunchLength = 0.0
+            Ef_map = np.zeros(ns)
+            s_grid = np.zeros(ns)
+            rho_f = np.zeros(ns)
+            fi_grid = np.zeros(ns)
+            return (rho_xz_slices_, phi_cube, Ex_cube, Ez_cube,
+                    global_xmin, global_xmax, global_zmin, global_zmax,
+                    BunchLength, Ef_map, s_grid, rho_f,
+                    coords_r, coords_fi, np.zeros_like(coords_r), np.zeros_like(coords_r),
+                    coords_z, fi_grid)
+
+        # 2) 本地 phi 覆盖范围 -> 全局 phi 范围
         arc_start_local, arc_end_local, _ = divide_arc2(coords_fi_mod)
-        local_arc = np.array([arc_start_local, arc_end_local])
-        all_arcs = np.zeros((size, 2))
+        local_arc = np.array([arc_start_local, arc_end_local], dtype=np.float64)
+        all_arcs = np.zeros((size, 2), dtype=np.float64)
         comm.Allgather(local_arc, all_arcs)
-        arcs_list = [tuple(row) for row in all_arcs]
-        fi_s_global, fi_e_global = merge_multiple_arcs(arcs_list)
+        fi_s_global, fi_e_global = merge_multiple_arcs([tuple(row) for row in all_arcs])
         if fi_e_global <= fi_s_global:
             fi_e_global += 2.0 * np.pi
 
-        # 3) φ 网格
+        # 3) phi grid
+        if ns < 2:
+            raise ValueError("self.f_grid_size must be >= 2")
         slice_fi_step = (fi_e_global - fi_s_global) / (ns - 1)
         fi_grid = np.linspace(fi_s_global, fi_e_global, ns)
 
         # 4) 全局平均 gamma
         sum_gamma_global = comm.allreduce(sum_gamma_local, op=MPI.SUM)
         count_global = comm.allreduce(survive_num, op=MPI.SUM)
-        if count_global > 0:
-            mean_gamma_global = sum_gamma_global / count_global - 1.0
-        else:
-            mean_gamma_global = 0.0
+        mean_gamma_global = sum_gamma_global / count_global - 1.0 if count_global > 0 else 0.0
+        gamma_abs_global = max(mean_gamma_global + 1.0, 1.0)
 
-        # 5) SEO 插值闭轨 r0(phi;Ek) -> 用粒子自己的 (gamma-1)Ek
+        # 5) SEO 插值：闭轨 r0(phi;Ek), pr0(phi;Ek)
+        coords_Ek_MeV = (coords_gamma - 1.0) * self.E0_rest_MeV
+
         coords_r0, _ = Bilinear_interp_2D_vect_uniform(
             SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
             SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
-            SEO_r_matrix,
-            (coords_gamma-1) * self.E0_rest_MeV,
-            coords_fi_mod,
-            self.Malloc_SC_r_SEO,
-            self.Malloc_SC_interp_flag
-        )
+            SEO_r_matrix, coords_Ek_MeV, coords_fi_mod,
+            self.Malloc_SC_r_SEO, self.Malloc_SC_interp_flag)
+
         coords_pr0, _ = Bilinear_interp_2D_vect_uniform(
             SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
             SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
-            SEO_pr_matrix,
-            (coords_gamma - 1.0) * self.E0_rest_MeV,
-            coords_fi_mod,
-            self.Malloc_SC_pr_SEO,
-            self.Malloc_SC_interp_flag
-        )
+            SEO_pr_matrix, coords_Ek_MeV, coords_fi_mod,
+            self.Malloc_SC_pr_SEO, self.Malloc_SC_interp_flag)
 
-        # 6) 计算 x、slice_index、以及 slice 统计（count_slices 等）
+        # 6) 局部 x、slice index、slice 统计
         (coords_x, r_slices, z_slices, x_slices, count_slices, slice_indices,
-         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = (
-            ComputeSliceBoundsAndCoordsSBS_merged(
-                coords_r, coords_z, coords_fi_mod, coords_r0,
-                self.Malloc_SC_x,
-                slice_fi_step, fi_s_global, ns,
-                self.Malloc_SC_slice_r2d, self.Malloc_SC_slice_z2d, self.Malloc_SC_slice_x2d,
-                self.Malloc_SC_slice_indices
-            )
-        )
-        
-        # 7) 全局均值/方差（用二阶矩）
-        sum_x_global  = np.zeros(1, dtype=np.float64)
-        sum_z_global  = np.zeros(1, dtype=np.float64)
+         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = ComputeSliceBoundsAndCoordsSBS_merged(
+            coords_r, coords_z, coords_fi_mod, coords_r0, self.Malloc_SC_x,
+            slice_fi_step, fi_s_global, ns,
+            self.Malloc_SC_slice_r2d, self.Malloc_SC_slice_z2d, self.Malloc_SC_slice_x2d,
+            self.Malloc_SC_slice_indices)
+
+        # 7) 全局均值/方差，仅用于返回绘图范围
+        sum_x_global = np.zeros(1, dtype=np.float64)
+        sum_z_global = np.zeros(1, dtype=np.float64)
         sum_x2_global = np.zeros(1, dtype=np.float64)
         sum_z2_global = np.zeros(1, dtype=np.float64)
         count_slices_global = np.zeros_like(count_slices)
 
-        comm.Allreduce(np.array([sum_x_local, ]),  sum_x_global,  op=MPI.SUM)
-        comm.Allreduce(np.array([sum_z_local, ]),  sum_z_global,  op=MPI.SUM)
-        comm.Allreduce(np.array([sum_x2_local, ]), sum_x2_global, op=MPI.SUM)
-        comm.Allreduce(np.array([sum_z2_local, ]), sum_z2_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_x_local], dtype=np.float64), sum_x_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z_local], dtype=np.float64), sum_z_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_x2_local], dtype=np.float64), sum_x2_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z2_local], dtype=np.float64), sum_z2_global, op=MPI.SUM)
         comm.Allreduce(count_slices, count_slices_global, op=MPI.SUM)
 
         if count_global > 1:
-            global_mean_x = sum_x_global / count_global
-            global_mean_z = sum_z_global / count_global
-
-            global_var_x = sum_x2_global / count_global - global_mean_x ** 2
-            global_var_z = sum_z2_global / count_global - global_mean_z ** 2
-
+            global_mean_x = float(sum_x_global[0] / count_global)
+            global_mean_z = float(sum_z_global[0] / count_global)
+            global_var_x = float(sum_x2_global[0] / count_global - global_mean_x ** 2)
+            global_var_z = float(sum_z2_global[0] / count_global - global_mean_z ** 2)
             global_sigma_x = np.sqrt(max(global_var_x, 0.0))
             global_sigma_z = np.sqrt(max(global_var_z, 0.0))
         else:
             global_mean_x = global_mean_z = 0.0
-            global_sigma_x = global_sigma_z = 4.5/100
+            global_sigma_x = global_sigma_z = 0.03
 
         # 8) 束长 + s_grid
         SEO_perimeter_MeanGamma = np.interp(mean_gamma_global * self.E0_rest_MeV, SEO_Ek_axis, SEO_perimeter)
-        BunchLength = SEO_perimeter_MeanGamma * (fi_e_global - fi_s_global) / np.pi / 2.0
-        s_grid = fi_grid / np.pi / 2.0 * SEO_perimeter_MeanGamma
+        BunchLength = SEO_perimeter_MeanGamma * (fi_e_global - fi_s_global) / (2.0 * np.pi)
+        BunchLength = 10.0
+        s_grid = fi_grid / (2.0 * np.pi) * SEO_perimeter_MeanGamma
+        ds_charge = BunchLength / max(ns, 1)
 
-        scale = self.sigma_ratio
+        scale = getattr(self, "sigma_ratio", 4.0)
         global_xmin = global_mean_x - scale * global_sigma_x
         global_xmax = global_mean_x + scale * global_sigma_x
         global_zmin = global_mean_z - scale * global_sigma_z
         global_zmax = global_mean_z + scale * global_sigma_z
 
-        # 9) 只做 1D 纵向电荷：rho_f = 每个slice电荷
+        # 9) prescribed Gaussian / uniform longitudinal line density
         q_part = self.marcosize * self.q_charge
-        count_slices_global = np.ones((ns,))*count_global/ns
-        rho_f = count_slices_global * q_part  # (ns,)
-        rho_f_global = rho_f.copy()
-        # comm.Allreduce(MPI.IN_PLACE, rho_f_global, op=MPI.SUM)
+        Q_total = count_global * q_part
 
-        # 10) 纵向场（可保留）
-        Ef_map = total_field_1d_numba(s_grid, rho_f_global)
+        lambda_uniform = Q_total / BunchLength if BunchLength > 0.0 else 0.0
+        lambda_k = np.ones(ns, dtype=np.float64) * lambda_uniform
 
-        # 11) 线性(KV-like)横向场：Ex ~ lambda_k * x, Ez ~ lambda_k * z
-        #     这里用 a=scale*sigma_x, b=scale*sigma_z
-        # a = scale * global_sigma_x
-        # b = scale * global_sigma_z
-        a = scale * 3.0/100
-        b = scale * 3.0/100
-        ds = BunchLength / ns
-        lambda_k = rho_f_global / ds  # 线密度 (ns,)
+        rho_f_global = lambda_k * ds_charge
+        rho_f = rho_f_global.copy()
 
-        Ksc = 2.0e12  # 设一个常数匹配 tune shift
+        # 10) 纵向场：默认关掉，专注横向 tune shift
+        keep_longitudinal_field = False
+        Ef_map = total_field_1d_numba(s_grid, rho_f_global) if keep_longitudinal_field else np.zeros_like(s_grid)
+
+        # 11) Gaussian toy-model transverse SC field
+        eps0 = 8.8541878128e-12
+        sigma_x_gauss = max(float(getattr(self, "sigma_x_gauss", 1.0e-2)), 1.0e-12)
+        sigma_z_gauss = max(float(getattr(self, "sigma_z_gauss", 1.0e-2)), 1.0e-12)
+        sigma_x2 = sigma_x_gauss * sigma_x_gauss
+        sigma_z2 = sigma_z_gauss * sigma_z_gauss
+
+        use_gamma2_reduction = True
+        gamma2_factor = 1.0 / (gamma_abs_global * gamma_abs_global) if use_gamma2_reduction else 1.0
 
         self.Malloc_SC_Ex_p[:] = 0.0
         self.Malloc_SC_Ez_p[:] = 0.0
         self.Malloc_SC_Ef_p[:] = 0.0
 
         for j in range(survive_num):
-            i = coords_survive_idx[j]          # 回填到原粒子索引
-            k = int(slice_indices[j])          # slice id（与 survive 对齐）
-            x = coords_x[j]
-            z = coords_z[j]
+            i = int(coords_survive_idx[j])
+            k = int(slice_indices[j])
+            if k < 0:
+                k = 0
+            elif k >= ns:
+                k = ns - 1
 
-            self.Malloc_SC_Ex_p[i] = (Ksc * lambda_k[k] * x / (a * (a + b)))*(1/np.sqrt(1+coords_pr0[i]*coords_pr0[i]))
-            self.Malloc_SC_Ez_p[i] = Ksc * lambda_k[k] * z / (b * (a + b))
-            self.Malloc_SC_Ef_p[i] = (Ksc * lambda_k[k] * x / (a * (a + b)))*(-coords_pr0[i]/np.sqrt(1+coords_pr0[i]*coords_pr0[i]))
-            # print(self.Malloc_SC_Ex_p[i])
-            self.LocalBunch[i, 10] = (Ksc * lambda_k[k] * x / (a * (a + b)))*(1/np.sqrt(1+coords_pr0[i]*coords_pr0[i]))
-            self.LocalBunch[i, 11] = Ksc * lambda_k[k] * z / (b * (a + b))
-            self.LocalBunch[i, 12] = (Ksc * lambda_k[k] * x / (a * (a + b)))*(-coords_pr0[i]/np.sqrt(1+coords_pr0[i]*coords_pr0[i]))
+            x = float(coords_x[j])
+            z = float(coords_z[j])
+            lambda_line = float(lambda_k[k])
+            factor = lambda_line / (2.0 * np.pi * eps0)
 
+            arg_x = x * x / (2.0 * sigma_x2)
+            if arg_x < 1.0e-10:
+                Ex_local = factor * x / (2.0 * sigma_x2)
+            else:
+                Ex_local = factor * (-np.expm1(-arg_x)) / x
 
-        # 不再返回 PIC 立方
+            arg_z = z * z / (2.0 * sigma_z2)
+            if arg_z < 1.0e-10:
+                Ez_local = factor * z / (2.0 * sigma_z2)
+            else:
+                Ez_local = factor * (-np.expm1(-arg_z)) / z
+
+            Ex_local *= gamma2_factor
+            Ez_local *= gamma2_factor
+
+            pr0 = float(coords_pr0[j])
+            norm = np.sqrt(1.0 + pr0 * pr0)
+
+            Er_sc = Ex_local / norm
+            Efi_sc = -Ex_local * pr0 / norm
+
+            self.Malloc_SC_Ex_p[i] = Er_sc
+            self.Malloc_SC_Ez_p[i] = Ez_local
+            self.Malloc_SC_Ef_p[i] = Efi_sc + Ef_map[k] if keep_longitudinal_field else Efi_sc
+
+            self.LocalBunch[i, 10] = self.Malloc_SC_Ex_p[i]
+            self.LocalBunch[i, 11] = self.Malloc_SC_Ez_p[i]
+            self.LocalBunch[i, 12] = self.Malloc_SC_Ef_p[i]
+
         rho_xz_slices_ = None
         phi_cube = None
         Ex_cube = None
@@ -1907,6 +2249,273 @@ class FFAG_Bunch:
                 global_xmin, global_xmax, global_zmin, global_zmax,
                 BunchLength, Ef_map, s_grid, rho_f,
                 coords_r, coords_fi, coords_x, coords_r0, coords_z, fi_grid)
+
+    def Build_2_5D_SliceGrid_sbs_GaussianToy(self, fft_fwd_1=None, fft_inv_1=None):
+        """
+        Gaussian toy-model space-charge solver.
+
+        保留：
+            1. 存活粒子坐标读取
+            2. phi 范围合并
+            3. SEO 闭轨插值
+            4. 局部横向坐标 x 构造
+            5. slice 划分
+            6. 解析 Gaussian 横向空间电荷场
+            7. 回填 LocalBunch[:,10:13]
+
+        横向场模型：
+            E_x = lambda/(2*pi*eps0*x) * [1 - exp(-x^2/(2*sigma_x^2))]
+            E_z = lambda/(2*pi*eps0*z) * [1 - exp(-z^2/(2*sigma_z^2))]
+
+        纵向线密度：
+            Gaussian, sigma_s_gauss = 2.0 m, BunchLength = 10.0 m
+        """
+
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+
+        ns = self.f_grid_size
+        nx = self.x_grid_size
+        nz = self.z_grid_size
+
+        SEO_fi_axis = self.SEO_fi_axis
+        SEO_Ek_axis = self.SEO_Ek_axis
+        SEO_r_matrix = self.SEO_r_matrix
+        SEO_pr_matrix = self.SEO_pr_matrix
+        SEO_perimeter = self.SEO_perimeter
+
+        # 1) 本地存活粒子坐标
+        if self.BunchType == "Boris":
+            (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
+             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5(
+                self.LocalBunch, self.Step_SurviveFlag, self.Malloc_SC_r, self.Malloc_SC_fi,
+                self.Malloc_SC_z, self.Malloc_SC_gamma, self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod, self.Malloc_SC_surviveIDX, self.speed_c)
+        elif self.BunchType == "RK4":
+            (coords_r, coords_fi, coords_z, coords_gamma, coords_mean_gamma,
+             coords_fi_mod, coords_survive_idx, survive_num, sum_gamma_local) = GetLocalCoordinates_2p5_rk(
+                self.LocalBunch, self.Step_SurviveFlag, self.Malloc_SC_r, self.Malloc_SC_fi,
+                self.Malloc_SC_z, self.Malloc_SC_gamma, self.Malloc_SC_mean_gamma_interp,
+                self.Malloc_SC_fiMod, self.Malloc_SC_surviveIDX, self.speed_c)
+        else:
+            raise ValueError("BunchType must be Boris or RK4")
+
+        if survive_num <= 0:
+            self.Malloc_SC_Ex_p[:] = 0.0
+            self.Malloc_SC_Ez_p[:] = 0.0
+            self.Malloc_SC_Ef_p[:] = 0.0
+            rho_xz_slices_ = phi_cube = Ex_cube = Ez_cube = None
+            global_xmin = global_xmax = global_zmin = global_zmax = BunchLength = 0.0
+            Ef_map = np.zeros(ns)
+            s_grid = np.zeros(ns)
+            rho_f = np.zeros(ns)
+            fi_grid = np.zeros(ns)
+            return (rho_xz_slices_, phi_cube, Ex_cube, Ez_cube,
+                    global_xmin, global_xmax, global_zmin, global_zmax,
+                    BunchLength, Ef_map, s_grid, rho_f,
+                    coords_r, coords_fi, np.zeros_like(coords_r), np.zeros_like(coords_r),
+                    coords_z, fi_grid)
+
+        # 2) 本地 phi 覆盖范围 -> 全局 phi 范围
+        arc_start_local, arc_end_local, _ = divide_arc2(coords_fi_mod)
+        local_arc = np.array([arc_start_local, arc_end_local], dtype=np.float64)
+        all_arcs = np.zeros((size, 2), dtype=np.float64)
+        comm.Allgather(local_arc, all_arcs)
+        fi_s_global, fi_e_global = merge_multiple_arcs([tuple(row) for row in all_arcs])
+        if fi_e_global <= fi_s_global:
+            fi_e_global += 2.0 * np.pi
+
+        # 3) phi grid
+        if ns < 2:
+            raise ValueError("self.f_grid_size must be >= 2")
+        slice_fi_step = (fi_e_global - fi_s_global) / (ns - 1)
+        fi_grid = np.linspace(fi_s_global, fi_e_global, ns)
+
+        # 4) 全局平均 gamma
+        sum_gamma_global = comm.allreduce(sum_gamma_local, op=MPI.SUM)
+        count_global = comm.allreduce(survive_num, op=MPI.SUM)
+        mean_gamma_global = sum_gamma_global / count_global - 1.0 if count_global > 0 else 0.0
+        gamma_abs_global = max(mean_gamma_global + 1.0, 1.0)
+
+        # 5) SEO 插值：闭轨 r0(phi;Ek), pr0(phi;Ek)
+        coords_Ek_MeV = (coords_gamma - 1.0) * self.E0_rest_MeV
+
+        coords_r0, _ = Bilinear_interp_2D_vect_uniform(
+            SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
+            SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
+            SEO_r_matrix, coords_Ek_MeV, coords_fi_mod,
+            self.Malloc_SC_r_SEO, self.Malloc_SC_interp_flag)
+
+        coords_pr0, _ = Bilinear_interp_2D_vect_uniform(
+            SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
+            SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
+            SEO_pr_matrix, coords_Ek_MeV, coords_fi_mod,
+            self.Malloc_SC_pr_SEO, self.Malloc_SC_interp_flag)
+
+        # 6) 局部 x、slice index、slice 统计
+        (coords_x, r_slices, z_slices, x_slices, count_slices, slice_indices,
+         sum_x_local, sum_z_local, sum_x2_local, sum_z2_local) = ComputeSliceBoundsAndCoordsSBS_merged(
+            coords_r, coords_z, coords_fi_mod, coords_r0, self.Malloc_SC_x,
+            slice_fi_step, fi_s_global, ns,
+            self.Malloc_SC_slice_r2d, self.Malloc_SC_slice_z2d, self.Malloc_SC_slice_x2d,
+            self.Malloc_SC_slice_indices)
+
+        # 7) 全局均值/方差，仅用于返回绘图范围
+        sum_x_global = np.zeros(1, dtype=np.float64)
+        sum_z_global = np.zeros(1, dtype=np.float64)
+        sum_x2_global = np.zeros(1, dtype=np.float64)
+        sum_z2_global = np.zeros(1, dtype=np.float64)
+        count_slices_global = np.zeros_like(count_slices)
+
+        comm.Allreduce(np.array([sum_x_local], dtype=np.float64), sum_x_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z_local], dtype=np.float64), sum_z_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_x2_local], dtype=np.float64), sum_x2_global, op=MPI.SUM)
+        comm.Allreduce(np.array([sum_z2_local], dtype=np.float64), sum_z2_global, op=MPI.SUM)
+        comm.Allreduce(count_slices, count_slices_global, op=MPI.SUM)
+
+        if count_global > 1:
+            global_mean_x = float(sum_x_global[0] / count_global)
+            global_mean_z = float(sum_z_global[0] / count_global)
+            global_var_x = float(sum_x2_global[0] / count_global - global_mean_x ** 2)
+            global_var_z = float(sum_z2_global[0] / count_global - global_mean_z ** 2)
+            global_sigma_x = np.sqrt(max(global_var_x, 0.0))
+            global_sigma_z = np.sqrt(max(global_var_z, 0.0))
+        else:
+            global_mean_x = global_mean_z = 0.0
+            global_sigma_x = global_sigma_z = 0.03
+
+        # 8) 束长 + s_grid
+        SEO_perimeter_MeanGamma = np.interp(mean_gamma_global * self.E0_rest_MeV, SEO_Ek_axis, SEO_perimeter)
+
+        BunchLength = 10.0
+        s_grid = np.linspace(0.0, BunchLength, ns)
+        ds_charge = BunchLength / max(ns, 1)
+
+        scale = getattr(self, "sigma_ratio", 4.0)
+        global_xmin = global_mean_x - scale * global_sigma_x
+        global_xmax = global_mean_x + scale * global_sigma_x
+        global_zmin = global_mean_z - scale * global_sigma_z
+        global_zmax = global_mean_z + scale * global_sigma_z
+
+        # 9) prescribed longitudinal Gaussian line density
+        q_part = self.marcosize * self.q_charge
+        Q_total = count_global * q_part
+
+        sigma_s_gauss = 2.0
+        s_center = 0.5 * (s_grid[0] + s_grid[-1])
+
+        profile = np.exp(-0.5 * ((s_grid - s_center) / sigma_s_gauss) ** 2)
+        norm_charge = np.sum(profile) * ds_charge
+        lambda_k = Q_total * profile / norm_charge
+
+        rho_f_global = lambda_k * ds_charge
+        rho_f = rho_f_global.copy()
+
+        # 10) 纵向场：默认关掉，专注横向 tune shift
+        keep_longitudinal_field = False
+        Ef_map = total_field_1d_numba(s_grid, rho_f_global) if keep_longitudinal_field else np.zeros_like(s_grid)
+
+        # 11) Gaussian toy-model transverse SC field
+        eps0 = 8.8541878128e-12
+        sigma_x_gauss = max(float(getattr(self, "sigma_x_gauss", 1.0e-2)), 1.0e-12)
+        sigma_z_gauss = max(float(getattr(self, "sigma_z_gauss", 1.0e-2)), 1.0e-12)
+        sigma_x2 = sigma_x_gauss * sigma_x_gauss
+        sigma_z2 = sigma_z_gauss * sigma_z_gauss
+
+        use_gamma2_reduction = True
+        gamma2_factor = 1.0 / (gamma_abs_global * gamma_abs_global) if use_gamma2_reduction else 1.0
+
+        self.Malloc_SC_Ex_p[:] = 0.0
+        self.Malloc_SC_Ez_p[:] = 0.0
+        self.Malloc_SC_Ef_p[:] = 0.0
+
+        for j in range(survive_num):
+            i = int(coords_survive_idx[j])
+            k = int(slice_indices[j])
+            if k < 0:
+                k = 0
+            elif k >= ns:
+                k = ns - 1
+
+            x = float(coords_x[j])
+            z = float(coords_z[j])
+            lambda_line = float(lambda_k[k])
+            factor = lambda_line / (2.0 * np.pi * eps0)
+
+            arg_x = x * x / (2.0 * sigma_x2)
+            if arg_x < 1.0e-10:
+                Ex_local = factor * x / (2.0 * sigma_x2)
+            else:
+                Ex_local = factor * (-np.expm1(-arg_x)) / x
+
+            arg_z = z * z / (2.0 * sigma_z2)
+            if arg_z < 1.0e-10:
+                Ez_local = factor * z / (2.0 * sigma_z2)
+            else:
+                Ez_local = factor * (-np.expm1(-arg_z)) / z
+
+            Ex_local *= gamma2_factor
+            Ez_local *= gamma2_factor
+
+            pr0 = float(coords_pr0[j])
+            norm = np.sqrt(1.0 + pr0 * pr0)
+
+            Er_sc = Ex_local / norm
+            Efi_sc = -Ex_local * pr0 / norm
+
+            self.Malloc_SC_Ex_p[i] = Er_sc
+            self.Malloc_SC_Ez_p[i] = Ez_local
+            self.Malloc_SC_Ef_p[i] = Efi_sc + Ef_map[k] if keep_longitudinal_field else Efi_sc
+
+            self.LocalBunch[i, 10] = self.Malloc_SC_Ex_p[i]
+            self.LocalBunch[i, 11] = self.Malloc_SC_Ez_p[i]
+            self.LocalBunch[i, 12] = self.Malloc_SC_Ef_p[i]
+
+        rho_xz_slices_ = None
+        phi_cube = None
+        Ex_cube = None
+        Ez_cube = None
+
+        return (rho_xz_slices_, phi_cube, Ex_cube, Ez_cube,
+                global_xmin, global_xmax, global_zmin, global_zmax,
+                BunchLength, Ef_map, s_grid, rho_f,
+                coords_r, coords_fi, coords_x, coords_r0, coords_z, fi_grid)
+
+@njit(cache=True)
+def make_realspace_log_kernel_padded_numba(nx: int, nz: int,
+                                           dx: float, dz: float,
+                                           self_radius_factor: float = 0.5) -> np.ndarray:
+    """
+    构造 (2*nz, 2*nx) 的开放边界二维 Green kernel。
+    返回 float32 数组，供 pyFFTW 的 complex64 频域卷积使用。
+    """
+    eps0 = 8.854187817e-12
+    nz_pad = 2 * nz
+    nx_pad = 2 * nx
+
+    kernel = np.empty((nz_pad, nx_pad), dtype=np.float32)
+    coeff = np.float32(-1.0 / (2.0 * np.pi * eps0))
+
+    # 自项等效半径，避免 log(0)
+    r_eq = np.float32(self_radius_factor * np.sqrt(dx * dx + dz * dz))
+
+    for j in range(nz_pad):
+        jj = j if j < nz else j - nz_pad
+        z = np.float32(jj * dz)
+
+        for i in range(nx_pad):
+            ii = i if i < nx else i - nx_pad
+            x = np.float32(ii * dx)
+
+            r2 = x * x + z * z
+            if r2 == 0.0:
+                kernel[j, i] = coeff * np.log(r_eq)
+            else:
+                # coeff * ln(r) = coeff * 0.5 * ln(r^2)
+                kernel[j, i] = coeff * np.float32(0.5) * np.log(r2)
+
+    return kernel
 
 
 if __name__ == "__main__":

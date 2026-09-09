@@ -20,7 +20,7 @@ config['plot_frequency_curve'] = True
 config['plot_spiral_map'] = True
 
 # 频率曲线输出文件
-config['filename'] = './Emaps_test/FrequencyCurve_Lpaint_1.txt'
+config['filename'] = './Emaps/FrequencyCurve_LSC.txt'
 
 ###############################################################
 # ------------------- Machine parameters ---------------------
@@ -34,34 +34,34 @@ machine['energy_ext'] = 600   # MeV
 ###############################################################
 Emap = dict()
 
-Emap['Bmap_fold'] = "./Bmap_FD16"       # 磁场文件目录
+Emap['Bmap_fold'] = "../Bmaps/Bmap_FD16"       # 磁场文件目录
 # Emap['Bmap_fold'] = "/hpcfs/APG/zhoukai/ffa/Bmap"
 
 # ============================================================
 # 同步相位程序
 # ============================================================
-# Emap['acc_phase_start'] = 0.0    # 涂抹相位（度）
-# Emap['acc_phase_end'] = 30.0     # 加速相位（度）
-# Emap['phase_ramp_start'] = 1000  # 平滑变化开始圈
-# Emap['phase_ramp_end'] = 2000    # 平滑变化结束圈
+Emap['acc_phase_start'] = 0.0    # 涂抹相位（度）
+Emap['acc_phase_end'] = 30.0     # 加速相位（度）
+Emap['phase_ramp_start'] = 1000  # 平滑变化开始圈
+Emap['phase_ramp_end'] = 2000    # 平滑变化结束圈
 
-Emap['acc_phase_start'] = 30.0      # 涂抹相位（度）
-Emap['acc_phase_end'] = 30.0       # 加速相位（度）
-Emap['phase_ramp_start'] = 1000       # 同步相位线性变化开始圈编号
-Emap['phase_ramp_end'] = 2000         # 同步相位线性变化结束圈编号
+# Emap['acc_phase_start'] = 30.0      # 涂抹相位（度）
+# Emap['acc_phase_end'] = 30.0       # 加速相位（度）
+# Emap['phase_ramp_start'] = 1000       # 同步相位线性变化开始圈编号
+# Emap['phase_ramp_end'] = 2000         # 同步相位线性变化结束圈编号
 
 # ============================================================
 # 电压程序
 # ============================================================
-# Emap['acc_voltage_start'] = 100e3    # 涂抹电压
-# Emap['acc_voltage_end'] = 300e3      # 加速电压
-# Emap['voltage_ramp_start'] = 1000    # 前1000圈固定为 acc_voltage_start
-# Emap['voltage_ramp_end'] = 1100      # 1000~1100圈线性过渡到 acc_voltage_end
+Emap['acc_voltage_start'] = 100e3    # 涂抹电压
+Emap['acc_voltage_end'] = 150e3      # 加速电压
+Emap['voltage_ramp_start'] = 1000    # 前1000圈固定为 acc_voltage_start
+Emap['voltage_ramp_end'] = 1100      # 1000~1100圈线性过渡到 acc_voltage_end
 
-Emap['acc_voltage_start'] = 100e3      # 涂抹电压
-Emap['acc_voltage_end'] = 100e3        # 加速电压
-Emap['voltage_ramp_start'] = 1000      # 加速电压线性变化开始圈编号
-Emap['voltage_ramp_end'] = 1100        # 加速电压线性变化结束圈编号
+# Emap['acc_voltage_start'] = 100e3      # 涂抹电压
+# Emap['acc_voltage_end'] = 100e3        # 加速电压
+# Emap['voltage_ramp_start'] = 1000      # 加速电压线性变化开始圈编号
+# Emap['voltage_ramp_end'] = 1100        # 加速电压线性变化结束圈编号
 
 # 相位说明：
 #   涂抹阶段 (0 ~ phase_ramp_start)
@@ -115,7 +115,7 @@ Emap['rmax'] = 12.5                     # fixed 模型下电场有效最大半�
 #   spiral_r_ref     : 参考半径 r_ref（m）
 #   spiral_s_ref_deg : 参考角 s_ref（度）
 #   spiral_Nphi      : 在频率曲线求交时使用的 phi 扫描点数
-Emap['spiral_alpha_deg'] = 50.00
+Emap['spiral_alpha_deg'] = 0.00
 Emap['spiral_r_ref'] = 8.5
 Emap['spiral_s_ref_deg'] = 20.0
 Emap['spiral_Nphi'] = 4000
@@ -148,7 +148,7 @@ Emap['spiral_normal_side'] = 1          # 法向方向：+1 左法向，-1 右�
 # spiral map 生成参数
 # ============================================================
 # 输出目录与文件名
-Emap['emap_save_dir'] = './Emaps_test'
+Emap['emap_save_dir'] = './Emaps'
 Emap['Er_map_file'] = 'Er_coef.txt'
 Emap['Ez_map_file'] = 'Ez_coef.txt'
 Emap['Ephi_map_file'] = 'Ephi_coef.txt'

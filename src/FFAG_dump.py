@@ -812,7 +812,6 @@ class PositionDumpBunch:
         # 创建保存路径，按 rank 创建子文件夹
         # self.local_folder_path = os.path.join(save_folder, f"rank_{self.rank}")
         if self.rank == 0:
-            # print(f"文件夹 {save_folder} 已成功创建。")
             if not os.path.exists(save_folder):
                 os.makedirs(save_folder)
                 print(f"文件夹 {save_folder} 已成功创建。")
@@ -820,14 +819,10 @@ class PositionDumpBunch:
                 if os.listdir(save_folder):  # 检查文件夹是否为空
                     sys.stderr.write(f"Error: 数据文件夹 {save_folder} 已存在且不为空，所有进程将被终止。\n")
                     comm.Abort(1)
-        # print(f"[rank {self.rank}] init dump_folder={save_folder}", flush=True)
-        # print(f"[rank {self.rank}] BEFORE barrier dump_folder={save_folder}", flush=True)
-        # comm.Barrier()
-        # print(f"[rank {self.rank}] AFTER barrier dump_folder={save_folder}", flush=True)
+        comm.Barrier()  # 同步所有进程
 
-
-        # if not os.path.exists(self.save_folder):
-            # os.makedirs(self.save_folder)
+        if not os.path.exists(self.save_folder):
+            os.makedirs(self.save_folder)
         # if self.rank == 0:
         #     print(f"Rank {self.rank} 完成文件夹检查, 当前时间: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
 

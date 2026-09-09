@@ -1,0 +1,13 @@
+# Generated benchmark outputs and caches
+scripts/**/outputs/
+scripts/**/results/
+scripts/**/*.csv
+scripts/**/*.npz
+scripts/**/*.png
+scripts/**/*.pdf
+scripts/**/*.txt
+scripts/**/*.json
+scripts/**/__pycache__/
+scripts/**/*.py[cod]
+scripts/**/*.nbc
+scripts/**/*.nbi

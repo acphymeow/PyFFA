@@ -4,16 +4,23 @@ import argparse
 import copy
 import numpy as np
 from FFAG_track import FFAG_RungeKutta, FFAG_SearchSEO, FunctionForAccelerationBunch_dt
-from FFAG_Field import FFAG_Bfield_analytical, FFAG_BField_Error
+from FFAG_Field import FFAG_Bfield_analytical, FFAG_Bfield_3D_opera, FFAG_BField_Error
 from FFAG_ParasAndConversion import FFAG_GlobalParameters, FFAG_ConversionTools
 from FFAG_BetaFunc import FFAG_BetaFuncCalc
-from numba import set_num_threads
-set_num_threads(1)
+
+
+def load_bmap_auto(bmap_path, max_order=0):
+    analytical_config = os.path.join(bmap_path, "config_Bmap.json")
+    if os.path.exists(analytical_config):
+        return FFAG_Bfield_analytical(analytical_config, max_order)
+
+    return FFAG_Bfield_3D_opera(field_dir=bmap_path)
+
 
 def main(EkRange, coeff_matrices_path, SEO_folder, BHarmonicsConfig):
 
     # # Load BMap data
-    BMapData = FFAG_Bfield_analytical(os.path.join(coeff_matrices_path, "config_Bmap.json"), 0)
+    BMapData = load_bmap_auto(coeff_matrices_path, max_order=0)
     BMapHarmonics = FFAG_BField_Error(BHarmonicsConfig['harmonics'],BHarmonicsConfig['enable'])
 
     # Generate global parameters
@@ -24,9 +31,10 @@ def main(EkRange, coeff_matrices_path, SEO_folder, BHarmonicsConfig):
 
     # Search SEO
     SEO_FilePath = FFAG_SearchSEO(GlobalParas).SearchSEOsControllerVect(EkRange)
+    # SEO_FilePath = "./Bmap_FD16/resultsSEO_noError"
 
     # Calculate beta functions
-    FFAG_BetaFuncCalc().CalcBetaFunc(SEO_FilePath, EkRange)
+    FFAG_BetaFuncCalc().CalcBetaFuncXPX(SEO_FilePath, EkRange)
 
     return SEO_FilePath
 
@@ -34,23 +42,12 @@ def main(EkRange, coeff_matrices_path, SEO_folder, BHarmonicsConfig):
 
 
 if __name__ == "__main__":
-    # Set up argument parser
     parser = argparse.ArgumentParser(description="FFAG Simulation Command-Line Tool")
-    parser.add_argument("-j", "--json_path", type=str, required=True, help="磁场系数矩阵路径")
-
-    # Parse arguments
+    parser.add_argument("-j", "--json_path", type=str, required=True, help="Path to config_SEO.json")
     args = parser.parse_args()
 
-    # 获取 JSON 文件所在目录
-    json_dir = os.path.dirname(os.path.abspath(args.json_path))
-
-    # 读取配置文件
     with open(args.json_path, 'r') as f:
         config_data = json.load(f)
-
-    # # 读取配置文件
-    # with open("./config_SEO.json", 'r') as f:
-    #     config_data = json.load(f)
 
     start_Ek = config_data['config']['start_Ek']
     end_Ek = config_data['config']['end_Ek']

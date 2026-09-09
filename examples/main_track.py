@@ -7,7 +7,9 @@ set_num_threads(1)
 from FFAG_Distribution import GenerateBunches, LoadSEOParams
 from FFAG_track import FFAG_RungeKutta, FunctionForAccelerationBunch_dt
 from FFAG_ParasAndConversion import FFAG_GlobalParameters, FFAG_ConversionTools
-from FFAG_Field import FFAG_EField_new, FFAG_Bfield_analytical, FFAG_EField_spiral, FFAG_BField_Error
+from FFAG_Field import (FFAG_EField_new, FFAG_Bfield_analytical,
+                        FFAG_Bfield_3D_opera, FFAG_EField_spiral,
+                        FFAG_BField_Error, FFAG_BumpKickerField)
 from FFAG_Bunch import FFAG_Bunch, FFAG_ManageBunchAttribute
 from FFAG_dump import StepDump, StepDumpBunch, PositionDump, Dumps, PositionDumpBunch
 import matplotlib.pyplot as plt
@@ -16,9 +18,17 @@ import pyfftw
 
 # 从 JSON 文件读取配置
 def load_config_from_json(json_path):
-    with open(json_path, 'r') as f:
+    with open(json_path, 'r', encoding='utf-8-sig') as f:
         config = json.load(f)
     return config
+
+
+def load_bmap_auto(bmap_path, max_order=0):
+    analytical_config = os.path.join(bmap_path, "config_Bmap.json")
+    if os.path.exists(analytical_config):
+        return FFAG_Bfield_analytical(analytical_config, max_order)
+
+    return FFAG_Bfield_3D_opera(field_dir=bmap_path)
 
 def wrap_0_2pi(x):
     return x % (2.0 * np.pi)
@@ -185,14 +195,14 @@ def main(config_file, restart_bunch=None):
     # plt.xlabel("r (mm)")
     # plt.ylabel("z (mm)")
 
-    # plt.figure()
-    # plt.scatter(array_dist_p[:, 6], array_dist_p[:, 5], s=2)
-    # plt.xlabel("injection time (ns)")
-    # plt.ylabel("Ek (MeV)")
+    plt.figure()
+    plt.scatter(array_dist_p[:, 6], array_dist_p[:, 5], s=2)
+    plt.xlabel("injection time (ns)")
+    plt.ylabel("Ek (MeV)")
     # plt.xlim([-200,1000])
 
 
-    # plt.show()
+    plt.show()
 
     # StepDump 配置
     dumps_manager = Dumps()
@@ -242,13 +252,19 @@ def main(config_file, restart_bunch=None):
     SEO_r_info = np.loadtxt(os.path.join(SEOPATHName, "SEO_r.txt"), skiprows=1)
     SEO_pr_info = np.loadtxt(os.path.join(SEOPATHName, "SEO_pr.txt"), skiprows=1)
     SEO_fi_axis, SEO_Ek_axis, SEO_r_matrix, SEO_pr_matrix = SEO_r_info[0, 1:], SEO_r_info[1:, 0], SEO_r_info[1:, 1:], SEO_pr_info[1:, 1:]
+    # 构建 fixProjection 所需的额外 SEO 矩阵
+    from FFAG_SC_new import convert_seo_pr_to_pr0_geom, build_seo_s_matrix
+    SEO_pr0_geom_matrix = convert_seo_pr_to_pr0_geom(SEO_pr_matrix)
+    SEO_s_matrix, _ = build_seo_s_matrix(SEO_fi_axis, SEO_r_matrix, SEO_pr0_geom_matrix)
 
     GlobalParameters = FFAG_GlobalParameters()
-    BMap = FFAG_Bfield_analytical(os.path.join(BmapPath,"config_Bmap.json"), max_order)
+    BMap = load_bmap_auto(BmapPath, max_order)
 
-    # EMap = FFAG_EField_new(EmapPATHName, config['Emap']['enable'])
+    # 按 map 文件头的 gap_model 选择 E 场类（2026-08-07 恢复分派：
+    # 此前固定使用 FFAG_EField_new，spiral map 被按解析模型错误解析，
+    # 且其多 gap 循环 bug 导致只剩最后一个 gap 的电压）
     header, _ = FFAG_EField_new.ParseEmapFile(EmapPATHName)
-    gap_type = str(header["gap_model"]).strip().lower()
+    gap_type = str(header.get("gap_model", "fixed")).strip().lower()
     if gap_type == "fixed":
         EMap = FFAG_EField_new(EmapPATHName, config['Emap']['enable'])
     elif gap_type == "spiral":
@@ -259,17 +275,23 @@ def main(config_file, restart_bunch=None):
     with open (os.path.join(SEOPATHName, 'config_SEO.json'), "r") as SEOSetting:
         SEO_config = json.load(SEOSetting)
     BMapHarmonics = FFAG_BField_Error(SEO_config['BHarmonics']['harmonics'], SEO_config['BHarmonics']['enable'])
+    BumpKickerConfig = config.get('BumpKicker', {'enable': False, 'kickers': []})
+    BumpKickers = FFAG_BumpKickerField(
+        BumpKickerConfig.get('kickers', []),
+        BumpKickerConfig.get('enable', False)
+    )
 
     GlobalParameters.AddBMap(BMap)
     GlobalParameters.AddEMap(EMap)
     GlobalParameters.AddSEOInfo(SEO_info)
     GlobalParameters.AddBHarmonics(BMapHarmonics)
+    GlobalParameters.AddBumpKickers(BumpKickers)
     if config['Aperture']['enable']:
         GlobalParameters.AddAperture(config['Aperture']['Rmin'], config['Aperture']['Rmax'],
                                      config['Aperture']['Zmin'], config['Aperture']['Zmax'])
 
     # 初始化跟踪参数
-    t_start = -200.0*1e-9
+    t_start = config['track'].get('time_start', -200.0e-9)
     LocalParameters = dict()
     LocalParameters['stop_condition'] = config['track']['stop_condition']
     LocalParameters['time_step'] = config['track']['time_step']
@@ -321,6 +343,8 @@ def main(config_file, restart_bunch=None):
         BunchObj.SEO_r_matrix = SEO_r_matrix
         BunchObj.SEO_pr_matrix = SEO_pr_matrix
         BunchObj.SEO_perimeter = SEO_info[:, 8]
+        BunchObj.SEO_pr0_geom_matrix = SEO_pr0_geom_matrix
+        BunchObj.SEO_s_matrix = SEO_s_matrix
         if restart_bunch is not None:
             # 恢复统计量
             BunchObj.restore_from_restart_matrix()
@@ -335,9 +359,16 @@ def main(config_file, restart_bunch=None):
         BunchObj.SEO_r_matrix = SEO_r_matrix
         BunchObj.SEO_pr_matrix = SEO_pr_matrix
         BunchObj.SEO_perimeter = SEO_info[:, 8]
+        BunchObj.SEO_pr0_geom_matrix = SEO_pr0_geom_matrix
+        BunchObj.SEO_s_matrix = SEO_s_matrix
         if restart_bunch is not None:
             # 恢复统计量
             BunchObj.restore_from_restart_matrix()
+
+        BunchObj.sigma_x_gauss = 0.01
+        BunchObj.sigma_z_gauss = 0.01
+        BunchObj.sigma_s_gauss = 3.0
+
         rk.rk4_solve_dt_bunch3_withSC_boris(FunctionForAccelerationBunch_dt,
                                             t_start, BunchObj,
                                             GlobalParameters, LocalParameters)
@@ -346,26 +377,18 @@ def main(config_file, restart_bunch=None):
 
 
 if __name__ == "__main__":
-    # main("./config_track.json", "./time_6452.56_rank_0.npz")
-    main("./config_track.json")
-    # # 设置命令行参数解析
-    # parser = argparse.ArgumentParser(description="FFAG Simulation Tool")
-    # parser.add_argument(
-    #     "-j",
-    #     type=str,
-    #     required=True,
-    #     help="Path to the JSON configuration file (e.g., config.json)"
-    # )
-    # parser.add_argument(
-    #     "-r",
-    #     type=str,
-    #     default=None,
-    #     help="Path to restart bunch file (optional)"
-    # )
-    #
-    # # 解析命令行参数
-    # args = parser.parse_args()
-    #
-    # # 调用主函数
-    # main(args.j, args.r)
-
+    parser = argparse.ArgumentParser(description="FFAG Simulation Tool")
+    parser.add_argument(
+        "-j",
+        type=str,
+        required=True,
+        help="Path to the JSON configuration file (e.g., config_track.json)"
+    )
+    parser.add_argument(
+        "-r",
+        type=str,
+        default=None,
+        help="Path to restart bunch file (optional)"
+    )
+    args = parser.parse_args()
+    main(args.j, args.r)

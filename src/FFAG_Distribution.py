@@ -1629,7 +1629,6 @@ def GenerateBunches(BunchPara):
         Bunches.append(sub_bunch)
         custdist_list.append(custdist)
         Centers_list.append(Centers)
-        # print(f"BinchID={i}")
 
     # 拼接所有子束团，形成一个完整的粒子束
     BunchesCombined = np.vstack(Bunches)

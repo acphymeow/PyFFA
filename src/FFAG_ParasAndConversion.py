@@ -26,6 +26,7 @@ class FFAG_GlobalParameters:
         self.Aperture_m = None
         self.Aperture_enable = False
         self.BHarmonics = None
+        self.BumpKickers = None
 
 
     def __repr__(self):
@@ -60,6 +61,9 @@ class FFAG_GlobalParameters:
 
     def AddBHarmonics(self, BHarmonicsList):
         self.BHarmonics = BHarmonicsList
+
+    def AddBumpKickers(self, BumpKickers):
+        self.BumpKickers = BumpKickers
 
     def AddEMap(self, EFieldMapData):
         self.Emap = EFieldMapData

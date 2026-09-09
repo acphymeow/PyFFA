@@ -933,6 +933,81 @@ def compute_taylor_coefficients_group(r_group, fi_axis_rad, laplacian_matrix, la
     return np.array(Bz_group), np.array(Br_group), np.array(Bfi_group)
 
 
+def Generate_Bmaps_Serial(MaxOrder, r_axis, fi_axis_rad, convex_paras,
+                          s_values_FitCoef_rad, BzR_coef_k, group_size=10):
+    """Generate the production Taylor Bmaps without a process pool.
+
+    This is the strictly serial counterpart of ``Generate_Bmaps_MultiProcess``.
+    It intentionally uses the same coefficient kernel and normalization as the
+    production multiprocess path; only task scheduling is changed.  The return
+    order is ``Br, Bz, Bfi``, with list index ``n`` representing the
+    ``z^(2n)`` term in Bz and the ``z^(2n+1)`` term in Br/Bfi.
+    """
+    if MaxOrder < 0:
+        raise ValueError("MaxOrder must be non-negative.")
+    if group_size < 1:
+        raise ValueError("group_size must be at least 1.")
+
+    Br_Taylor_matrices = []
+    Bz_Taylor_matrices = []
+    Bfi_Taylor_matrices = []
+
+    laplacian_matrix = np.array([[0, 0, 0, 1]])
+    for expansion_order in range(0, MaxOrder + 1):
+        print(
+            f"[Bmap serial] computing field orders "
+            f"{2 * expansion_order} and {2 * expansion_order + 1}...",
+            flush=True,
+        )
+        laplacian_matrix_OneMoreDr = apply_r_derivative(laplacian_matrix)
+        laplacian_matrix_OneMoreDf = apply_theta_derivative(laplacian_matrix)
+        const_coef_2np1 = (
+            (-1) ** expansion_order / factorial(2 * expansion_order + 1)
+        )
+        const_coef_2n = (
+            (-1) ** expansion_order / factorial(2 * expansion_order)
+        )
+
+        laplacian_matrix = merge_similar_terms(laplacian_matrix)
+        laplacian_matrix_OneMoreDr = merge_similar_terms(
+            laplacian_matrix_OneMoreDr
+        )
+        laplacian_matrix_OneMoreDf = merge_similar_terms(
+            laplacian_matrix_OneMoreDf
+        )
+
+        shape = (len(r_axis), len(fi_axis_rad))
+        Br_Taylor_matrix = np.zeros(shape, dtype=np.float64)
+        Bz_Taylor_matrix = np.zeros(shape, dtype=np.float64)
+        Bfi_Taylor_matrix = np.zeros(shape, dtype=np.float64)
+
+        for start_idx in range(0, len(r_axis), group_size):
+            r_group = r_axis[start_idx:start_idx + group_size]
+            Bz_group, Br_group, Bfi_group = compute_taylor_coefficients_group(
+                r_group,
+                fi_axis_rad,
+                laplacian_matrix,
+                laplacian_matrix_OneMoreDr,
+                laplacian_matrix_OneMoreDf,
+                convex_paras,
+                s_values_FitCoef_rad,
+                BzR_coef_k,
+                const_coef_2np1,
+                const_coef_2n,
+            )
+            end_idx = start_idx + Bz_group.shape[0]
+            Bz_Taylor_matrix[start_idx:end_idx, :] = Bz_group
+            Br_Taylor_matrix[start_idx:end_idx, :] = Br_group
+            Bfi_Taylor_matrix[start_idx:end_idx, :] = Bfi_group
+
+        Br_Taylor_matrices.append(Br_Taylor_matrix)
+        Bz_Taylor_matrices.append(Bz_Taylor_matrix)
+        Bfi_Taylor_matrices.append(Bfi_Taylor_matrix)
+        laplacian_matrix = apply_laplacian_combined(laplacian_matrix)
+
+    return Br_Taylor_matrices, Bz_Taylor_matrices, Bfi_Taylor_matrices
+
+
 def Generate_Bmaps_MultiProcess(MaxOrder, r_axis, fi_axis_rad, convex_paras, s_values_FitCoef_rad, BzR_coef_k):
     """
     为每个磁场分量 B_r, B_z, B_phi 生成从 0 到 MaxOrder 阶的泰勒展开系数矩阵（并行版本）。

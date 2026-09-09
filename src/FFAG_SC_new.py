@@ -1,7 +1,7 @@
 import numpy as np
 from numba.typed import List
 from numba import njit, prange
-from FFAG_MathTools import fast_mod_njit
+from FFAG_MathTools import fast_mod_njit, Bilinear_interp_2D_vect_uniform_3var
 from mpi4py import MPI
 
 
@@ -528,7 +528,49 @@ def ComputeSliceBoundsAndCoordsSBS_merged(coords_r, coords_z, coords_fi_mod, coo
         x2d[s, pos] = x
         counts[s] += 1
 
-    return coords_x[:N], r2d, z2d, x2d, counts, slice_indices, sum_x, sum_z, sum_x2, sum_z2
+    return coords_x[:N], r2d, z2d, x2d, counts, slice_indices[:N], sum_x, sum_z, sum_x2, sum_z2
+
+
+@njit(parallel=False)
+def ComputeSliceBoundsAndCoordsSBS_merged_s(coords_r, coords_z, coords_s_cont, coords_x,
+                                         slice_s_step,
+                                         s_start_global,
+                                         segments,
+                                         r2d, z2d, x2d, slice_indices):
+    """Slice particles by continuous longitudinal coordinate s."""
+    N = coords_r.shape[0]
+
+    counts = np.zeros(segments, dtype=np.int32)
+    sum_x = 0.0
+    sum_z = 0.0
+    sum_x2 = 0.0
+    sum_z2 = 0.0
+
+    for i in range(N):
+        x = coords_x[i]
+        z = coords_z[i]
+
+        sum_x += x
+        sum_z += z
+        sum_x2 += x * x
+        sum_z2 += z * z
+
+        islice = int((coords_s_cont[i] - s_start_global) / slice_s_step)
+
+        if islice < 0:
+            islice = 0
+        elif islice >= segments:
+            islice = segments - 1
+
+        slice_indices[i] = islice
+
+        pos = counts[islice]
+        r2d[islice, pos] = coords_r[i]
+        z2d[islice, pos] = z
+        x2d[islice, pos] = x
+        counts[islice] += 1
+
+    return coords_x[:N], r2d, z2d, x2d, counts, slice_indices[:N], sum_x, sum_z, sum_x2, sum_z2
 
 
 @njit()
@@ -761,25 +803,51 @@ def make_fft_kernel_open_numba(nx: int, nz: int,
 
 
 @njit()
-def total_field_1d_numba(z: np.ndarray, q: np.ndarray) -> np.ndarray:
-    EPS0 = 8.854_187_817e-12  # 真空介电常数 (F·m⁻¹)
-    K = 1.0 / (4.0 * np.pi * EPS0)
-    N  = z.size
-    Ez = np.zeros(N)
+def total_field_1d_numba(
+    z: np.ndarray,
+    q: np.ndarray,
+    a_radius: float = 0.04
+) -> np.ndarray:
+    """Longitudinal field from finite-radius uniformly charged disks."""
+    EPS0 = 8.854_187_817e-12
 
-    if z[1]-z[0]<=0.0:
-        return K * Ez
+    N = z.size
+    Ez = np.zeros(N, dtype=np.float64)
 
-    for i in range(N):                  # 并行外循环
+    if N < 2:
+        return Ez
+    if z[1] - z[0] <= 0.0:
+        return Ez
+    if a_radius <= 0.0:
+        return Ez
+
+    a2 = a_radius * a_radius
+    coeff = 1.0 / (2.0 * np.pi * EPS0 * a2)
+
+    for i in range(N):
         Ei = 0.0
         zi = z[i]
+
         for j in range(N):
             if i == j:
                 continue
+
             r = zi - z[j]
-            Ei += q[j] * np.sign(r) / (r*r)
-        Ez[i] = Ei
-    return K * Ez
+            abs_r = abs(r)
+
+            if r > 0.0:
+                sgn = 1.0
+            elif r < 0.0:
+                sgn = -1.0
+            else:
+                sgn = 0.0
+
+            kernel = sgn * (1.0 - abs_r / np.sqrt(r * r + a2))
+            Ei += q[j] * kernel
+
+        Ez[i] = coeff * Ei
+
+    return Ez
 
 
 @njit(parallel=True)
@@ -972,6 +1040,100 @@ def interpolate_fields_to_particles_SBS_numba(
     return Ex_p, Ez_p, Ef_p
 
 
+@njit(parallel=True)
+def interpolate_fields_to_particles_SBS_numba_withEfi(
+        Ex_cube, Ez_cube, Ef,
+        coords_x, coords_z, coords_pr0, slice_indices,
+        coords_survive_idx,
+        x0, z0,
+        dx, dz, BunchLength,
+        Ex_p, Ez_p, Ef_p, mat_in
+):
+    """Interpolate local Ex/Ez/Es and project them back to cylindrical Er/Ez/Ephi."""
+    ns, nz, nx = Ex_cube.shape
+    N = coords_x.shape[0]
+
+    bad_grid = (dx <= 0.0) or (dz <= 0.0) or (BunchLength <= 0.0)
+
+    for n in prange(N):
+        idx_out = coords_survive_idx[n]
+
+        if bad_grid:
+            Ex_p[n] = 0.0
+            Ez_p[n] = 0.0
+            Ef_p[n] = 0.0
+            mat_in[idx_out, 10] = 0.0
+            mat_in[idx_out, 11] = 0.0
+            mat_in[idx_out, 12] = 0.0
+            continue
+
+        s = slice_indices[n]
+        if s < 0:
+            s = 0
+        elif s >= ns:
+            s = ns - 1
+
+        Ex = Ex_cube[s]
+        Ez = Ez_cube[s]
+
+        t = (coords_x[n] - x0) / dx
+        u = (coords_z[n] - z0) / dz
+
+        i0 = int(np.floor(t))
+        j0 = int(np.floor(u))
+
+        if i0 < 0:
+            i0 = 0
+        elif i0 > nx - 2:
+            i0 = nx - 2
+
+        if j0 < 0:
+            j0 = 0
+        elif j0 > nz - 2:
+            j0 = nz - 2
+
+        alpha = t - i0
+        beta = u - j0
+
+        if alpha < 0.0:
+            alpha = 0.0
+        elif alpha > 1.0:
+            alpha = 1.0
+
+        if beta < 0.0:
+            beta = 0.0
+        elif beta > 1.0:
+            beta = 1.0
+
+        w00 = (1.0 - alpha) * (1.0 - beta)
+        w10 = alpha * (1.0 - beta)
+        w01 = (1.0 - alpha) * beta
+        w11 = alpha * beta
+
+        ex_loc = (w00 * Ex[j0, i0] + w10 * Ex[j0, i0 + 1] +
+                  w01 * Ex[j0 + 1, i0] + w11 * Ex[j0 + 1, i0 + 1])
+        ez_loc = (w00 * Ez[j0, i0] + w10 * Ez[j0, i0 + 1] +
+                  w01 * Ez[j0 + 1, i0] + w11 * Ez[j0 + 1, i0 + 1])
+        es_loc = Ef[s]
+
+        pr0 = coords_pr0[n]
+        inv_norm = 1.0 / np.sqrt(1.0 + pr0 * pr0)
+
+        er_global = (ex_loc + pr0 * es_loc) * inv_norm
+        ephi_global = (-pr0 * ex_loc + es_loc) * inv_norm
+        ez_global = ez_loc
+
+        Ex_p[n] = er_global
+        Ez_p[n] = ez_global
+        Ef_p[n] = ephi_global
+
+        mat_in[idx_out, 10] = er_global
+        mat_in[idx_out, 11] = ez_global
+        mat_in[idx_out, 12] = ephi_global
+
+    return Ex_p, Ez_p, Ef_p
+
+
 @njit()
 def coordinate_convert_SC(coords_r, mean_r_global, fi_s_global, fi_e_global, segments, slice_indices):
     """
@@ -1102,6 +1264,255 @@ def contiguous_block_for_rank(ns: int, size: int, rank: int):
     return begin, end, count
 
 
+
+
+@njit()
+def _get_4_candidate_shifts(period):
+    shifts = np.empty(4, dtype=np.float64)
+    shifts[0] = 0.0
+    shifts[1] = 0.5 * period
+    shifts[2] = 0.25 * period
+    shifts[3] = 0.75 * period
+    return shifts
+
+
+@njit()
+def _compute_shift_minmax_local(values_mod, period):
+    shifts = _get_4_candidate_shifts(period)
+
+    local_min = np.full(4, 1e30, dtype=np.float64)
+    local_max = np.full(4, -1e30, dtype=np.float64)
+
+    n = values_mod.shape[0]
+    if n == 0:
+        return local_min, local_max
+
+    for i in range(n):
+        v = values_mod[i]
+        for k in range(4):
+            p = fast_mod_njit(v + shifts[k], period)
+            if p < local_min[k]:
+                local_min[k] = p
+            if p > local_max[k]:
+                local_max[k] = p
+
+    return local_min, local_max
+
+
+@njit()
+def _choose_best_shift_from_minmax(min_v, max_v, period):
+    shifts = _get_4_candidate_shifts(period)
+    spans = max_v - min_v
+
+    best = 0
+    best_span = spans[0]
+    for k in range(1, 4):
+        if spans[k] < best_span:
+            best_span = spans[k]
+            best = k
+
+    best_shift = shifts[best]
+    arc_start = min_v[best] - best_shift
+    arc_end = max_v[best] - best_shift
+    return arc_start, arc_end, best_span, best_shift
+
+
+@njit()
+def unfold_periodic_values_with_shift(values_mod, period, best_shift, values_out):
+    n = values_mod.shape[0]
+    for i in range(n):
+        p = fast_mod_njit(values_mod[i] + best_shift, period)
+        values_out[i] = p - best_shift
+    return values_out[:n]
+
+
+def expand_periodic_arc(start, end, period):
+    if end < start:
+        end += period
+    return start, end
+
+
+def make_s_continuous_serial(s_mod, period):
+    s_mod = np.asarray(s_mod, dtype=np.float64)
+    min_v, max_v = _compute_shift_minmax_local(s_mod, period)
+    arc_start, arc_end, arc_len, best_shift = _choose_best_shift_from_minmax(min_v, max_v, period)
+    arc_start, arc_end = expand_periodic_arc(arc_start, arc_end, period)
+    s_cont = np.empty_like(s_mod)
+    s_cont = unfold_periodic_values_with_shift(s_mod, period, best_shift, s_cont)
+    return s_cont, arc_start, arc_end, arc_len, best_shift
+
+
+def make_s_continuous_mpi(s_mod_local, period, comm):
+    s_mod_local = np.asarray(s_mod_local, dtype=np.float64)
+    local_min, local_max = _compute_shift_minmax_local(s_mod_local, period)
+    global_min = np.empty_like(local_min)
+    global_max = np.empty_like(local_max)
+    comm.Allreduce(local_min, global_min, op=MPI.MIN)
+    comm.Allreduce(local_max, global_max, op=MPI.MAX)
+    arc_start, arc_end, arc_len, best_shift = _choose_best_shift_from_minmax(global_min, global_max, period)
+    arc_start, arc_end = expand_periodic_arc(arc_start, arc_end, period)
+    s_cont_local = np.empty_like(s_mod_local)
+    s_cont_local = unfold_periodic_values_with_shift(s_mod_local, period, best_shift, s_cont_local)
+    return s_cont_local, arc_start, arc_end, arc_len, best_shift
+
+
+@njit()
+def compute_local_coordinates_from_projection_at_energy(
+        SEO_Ek_axis,
+        SEO_fi_axis,
+        SEO_r_matrix,
+        SEO_pr0_matrix,
+        SEO_s_matrix,
+        coords_r,
+        coords_fi_mod,
+        coords_z,
+        ek_query,
+        malloc_r0_phi,
+        malloc_pr0_phi,
+        malloc_s_phi,
+        malloc_r0_star,
+        malloc_pr0_star,
+        malloc_s_star,
+        malloc_theta_star,
+        malloc_x,
+        malloc_interp_flag,
+):
+    """Project particles using the reference kinetic energy supplied per particle.
+
+    ``ek_query`` is a reference-frame property, not necessarily the particle's
+    own kinetic energy.  Passing one common value per longitudinal slice keeps
+    every transverse Poisson solve in a single closed-orbit tangent frame.
+    """
+
+    coords_r0_phi, coords_pr0_phi, coords_s_phi, _ = Bilinear_interp_2D_vect_uniform_3var(
+        SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
+        SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
+        SEO_r_matrix, SEO_pr0_matrix, SEO_s_matrix,
+        ek_query, coords_fi_mod,
+        malloc_r0_phi, malloc_pr0_phi, malloc_s_phi,
+        malloc_interp_flag
+    )
+
+    rprime_phi = coords_r0_phi * coords_pr0_phi
+    denom = coords_r0_phi * coords_r0_phi + rprime_phi * rprime_phi
+
+    delta_theta = np.zeros_like(coords_r, dtype=np.float64)
+    mask = denom > 0.0
+    delta_theta[mask] = ((coords_r[mask] - coords_r0_phi[mask]) * rprime_phi[mask]) / denom[mask]
+
+    two_pi = 2.0 * np.pi
+    theta_tmp = coords_fi_mod + delta_theta
+    coords_theta_star = theta_tmp - two_pi * np.floor(theta_tmp / two_pi)
+    malloc_theta_star[:len(coords_theta_star)] = coords_theta_star
+
+    coords_r0_star, coords_pr0_star, coords_s_star, _ = Bilinear_interp_2D_vect_uniform_3var(
+        SEO_Ek_axis[0], SEO_Ek_axis[1] - SEO_Ek_axis[0], len(SEO_Ek_axis),
+        SEO_fi_axis[0], SEO_fi_axis[1] - SEO_fi_axis[0], len(SEO_fi_axis),
+        SEO_r_matrix, SEO_pr0_matrix, SEO_s_matrix,
+        ek_query, coords_theta_star,
+        malloc_r0_star, malloc_pr0_star, malloc_s_star,
+        malloc_interp_flag
+    )
+
+    rprime_star = coords_r0_star * coords_pr0_star
+    h_star = np.sqrt(coords_r0_star * coords_r0_star + rprime_star * rprime_star)
+
+    coords_x = malloc_x
+    coords_x[:] = 0.0
+    mask_h = h_star > 0.0
+    coords_x[mask_h] = (
+        (coords_r[mask_h] - coords_r0_star[mask_h]) *
+        coords_r0_star[mask_h] / h_star[mask_h]
+    )
+
+    return (
+        coords_theta_star,
+        coords_x,
+        coords_s_star,
+        coords_z,
+        coords_pr0_star,
+        coords_r0_star,
+        coords_r0_phi,
+        coords_pr0_phi,
+        coords_s_phi,
+    )
+
+
+@njit()
+def compute_local_coordinates_from_projection(
+        SEO_Ek_axis,
+        SEO_fi_axis,
+        SEO_r_matrix,
+        SEO_pr0_matrix,
+        SEO_s_matrix,
+        coords_r,
+        coords_fi_mod,
+        coords_z,
+        coords_gamma,
+        E0_rest_MeV,
+        malloc_r0_phi,
+        malloc_pr0_phi,
+        malloc_s_phi,
+        malloc_r0_star,
+        malloc_pr0_star,
+        malloc_s_star,
+        malloc_theta_star,
+        malloc_x,
+        malloc_interp_flag,
+):
+    """Backward-compatible projection using each particle's own energy."""
+    ek_query = (coords_gamma - 1.0) * E0_rest_MeV
+    return compute_local_coordinates_from_projection_at_energy(
+        SEO_Ek_axis, SEO_fi_axis, SEO_r_matrix, SEO_pr0_matrix, SEO_s_matrix,
+        coords_r, coords_fi_mod, coords_z, ek_query,
+        malloc_r0_phi, malloc_pr0_phi, malloc_s_phi,
+        malloc_r0_star, malloc_pr0_star, malloc_s_star,
+        malloc_theta_star, malloc_x, malloc_interp_flag
+    )
+
+
+# ================================================================
+# SEO 矩阵转换工具（用于 fixProjection 求解器）
+# 来源：PRAB_papers/test_sc_260508_gauss.py
+# ================================================================
+
+def convert_seo_pr_to_pr0_geom(seo_pr_matrix):
+    """
+    将 pr = vr/v 转换为几何方向比 pr0 = r'/r。
+    中平面近似下：pr0 = pr / sqrt(1 - pr^2)
+    """
+    pr = np.asarray(seo_pr_matrix, dtype=np.float64)
+    denom = np.sqrt(np.maximum(1.0 - pr * pr, 1e-30))
+    return pr / denom
+
+
+def build_seo_s_matrix(seo_phi_axis, seo_r_matrix, seo_pr0_geom_matrix):
+    """
+    构造弧长表 s(phi, Ek)：
+        h(phi) = r * sqrt(1 + pr0^2)
+        s(phi) = integral h(phi) dphi  （逐能量累积）
+    返回 (s_matrix, perimeters)。
+    """
+    phi = np.asarray(seo_phi_axis, dtype=np.float64)
+    rmat = np.asarray(seo_r_matrix, dtype=np.float64)
+    pr0mat = np.asarray(seo_pr0_geom_matrix, dtype=np.float64)
+
+    nE, nphi = rmat.shape
+    s_matrix = np.zeros((nE, nphi), dtype=np.float64)
+    perimeter = np.zeros(nE, dtype=np.float64)
+    dphi = np.mean(np.diff(phi))
+
+    for iE in range(nE):
+        r = rmat[iE]
+        pr0 = pr0mat[iE]
+        h = r * np.sqrt(1.0 + pr0 * pr0)
+        s = np.zeros(nphi, dtype=np.float64)
+        for k in range(1, nphi):
+            s[k] = s[k - 1] + 0.5 * (h[k - 1] + h[k]) * dphi
+        s_matrix[iE] = s
+        perimeter[iE] = np.trapz(h, phi)
+
+    return s_matrix, perimeter
 
 
 if __name__ == '__main__':

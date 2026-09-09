@@ -7,12 +7,13 @@ config_data = {}
 ###############################################################
 # some general parameters
 config = dict()
-config['start_Ek'] = 280.0
+config['start_Ek'] = 300.0
 config['end_Ek'] = 600.0
-config['delta_Ek'] = 20
+config['delta_Ek'] = 50
 config['extra_Ek'] = ()
-config['Bmap_path'] = '../Bmaps/Bmap_FD16'    # 读A文件夹里的磁场
-config['SEO_folder'] = 'resultsSEO_noError'    # 闭轨结果放在文件夹A里面，子文件夹B下面
+# config['Bmap_path'] = './Bmaps/OperaFieldMap'    # 每个 OPERA 3D 文件夹内自动发现唯一的 .json/.npz 数据集
+config['Bmap_path'] = './Bmaps/Bmap_FD16_k7p63_B1p45_R165_Fp0p5'
+config['SEO_folder'] = 'resultsSEO'    # 闭轨结果放在文件夹A里面，子文件夹B下面
 
 ###############################################################################
 # field error
@@ -27,6 +28,7 @@ harmonic_2 = {
 harmonic_3 = {
     "m": 3,"amp_Gs": 12.0,"phase_deg": 30.0,
     "rmin": 11.2,"rmax": 11.4,}
+
 BHarmonics["harmonics"] = [harmonic_1, ]
 
 # ready to write out

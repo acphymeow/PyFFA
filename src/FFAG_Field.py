@@ -287,10 +287,15 @@ class FFAG_EField_new:
         Malloc_RF_shift[k]：记录第 k 个粒子所处 gap index；
         若粒子不在任何 gap 内，则为 -1。
         """
+        # 多 gap 叠加前统一清零（emap_kernel 未命中时不再清零，
+        # 否则会抹掉前一个 gap 写入的场 —— 2026-08-07 修复）
+        Er.fill(0.0)
+        Efi.fill(0.0)
+        Ez.fill(0.0)
+        Malloc_RF_shift.fill(-1)
+
         if not self.EnableFlag:
-            Er.fill(0.0)
-            Efi.fill(0.0)
-            Ez.fill(0.0)
+            return
 
         # 逐 gap 检查
         for gap_index, (region, theta, box) in enumerate(zip(self.acc_regions, self.gap_azimuths, self.box_bounds)):
@@ -638,6 +643,7 @@ class FFAG_Bfield_analytical:
         with open(config_Bmap_path, "r") as f:
             config_data = json.load(f)
 
+        self.field_type = "analytical"
         Bmap = config_data["Bmap"]
         rmin_max_step_m = Bmap["rmin_max_step_m"]
         SpiralAngle_deg = Bmap["SpiralAngle_deg"]
@@ -815,60 +821,6 @@ class FFAG_Bfield_analytical:
         return Bz
 
     # @profile
-    def GetBfi(self, r, fi, SearchMod = False):
-        # Bfi = (1/r) * dBz/dfi * z
-        # Bz = B0(r) * F[θ-s(r)]
-        # dBz / dfi = B0(r) * F'[θ-s(r)]
-        # dBz / dr = B0'(r) * F[θ-s(r)] - B0(r) * F'[θ-s(r)] * s'(r)
-
-        spiral_azimuth = polyval_manual(self.s_rad_polynomial, r)
-        # spiral_azimuth_prime = polyval_manual(self.s_rad_polynomial_prime, r)
-
-        B0rAmplitude = GetB0R_nth_derivative(self.B0, self.k_value, 0, r)
-        # B0rAmplitude_prime = GetB0R_nth_derivative(self.B0, self.k_value, 1, r)
-
-        # fi_shift = np.mod(fi - spiral_azimuth, 2 * np.pi / self.Nsectors)
-        fi_shift = fast_mod_njit(fi - spiral_azimuth, 2 * np.pi / self.Nsectors)
-        B0F, B0F_prime = GetB0F_nth_derivative(fi_shift, self.convex_params, 1)
-        Bfi = B0rAmplitude * B0F_prime / r  # F'[θ-s(r)] ---> B0F_prime
-
-        if SearchMod:
-            mask_low = r < self.r_min
-            mask_high = r > self.r_max
-            # 区间外直接赋值常量
-            Bfi[mask_low] = 0.0
-            Bfi[mask_high] = 0.0
-
-        return Bfi
-
-    def GetBr(self, r, fi, SearchMod = False):
-        # Br = dBz/dr * z
-        # Bz = B0(r) * F[θ-s(r)]
-        # dBz / dfi = B0(r) * F'[θ-s(r)]
-        # dBz / dr = B0'(r) * F[θ-s(r)] - B0(r) * F'[θ-s(r)] * s'(r)
-
-        spiral_azimuth = polyval_manual(self.s_rad_polynomial, r)
-        spiral_azimuth_prime = polyval_manual(self.s_rad_polynomial_prime, r)
-
-        B0rAmplitude = GetB0R_nth_derivative(self.B0, self.k_value, 0, r)
-        B0rAmplitude_prime = GetB0R_nth_derivative(self.B0, self.k_value, 1, r)
-
-        # fi_shift = np.mod(fi - spiral_azimuth, 2 * np.pi / self.Nsectors)
-        fi_shift = fast_mod_njit(fi - spiral_azimuth, 2 * np.pi / self.Nsectors)
-        B0F, B0F_prime = GetB0F_nth_derivative(fi_shift, self.convex_params, 1)
-
-        Br = B0rAmplitude_prime *  B0F - B0rAmplitude * B0F_prime * spiral_azimuth_prime
-
-        if SearchMod:
-            mask_low = r < self.r_min
-            mask_high = r > self.r_max
-            # 区间外直接赋值常量
-            Br[mask_low] = 0.0
-            Br[mask_high] = 0.0
-
-        return Br
-
-    # @profile
     def GetBfields(self, r, fi, z, Inj_flag, Survive_flag, Bz, Br, Bfi, SearchMod=False):
         """
         一次性计算并返回 Bz, Br, Bfi 分量
@@ -942,6 +894,303 @@ class FFAG_Bfield_analytical:
 
         print(f"[Bmap] Bmean 已保存到: {os.path.join(self.save_folder, config_json_name)}")
 
+
+
+class Opera3DFieldMapMetadata:
+    """
+    Metadata reader for the PyFFA OPERA 3D field-map layout.
+
+    Expected files for dataset ``FD16``:
+        OperaFieldMap/FD16.json
+        OperaFieldMap/FD16.npz
+        OperaFieldMap/FD16.TABLE
+        OperaFieldMap/FD16.grid
+    """
+
+    def __init__(self, json_path):
+        self.json_path = json_path
+        with open(json_path, "r", encoding="utf-8") as f:
+            self.raw = json.load(f)
+
+        self.coordinate_system = self.raw["coordinate_system"]
+        self.grid = self.raw["grid"]
+        self.array_layout = self.raw["array_layout"]
+        self.coordinate_table = self.raw.get("coordinate_table", {})
+
+        shape = tuple(int(v) for v in self.array_layout["shape"])
+        axis_order = tuple(self.array_layout["axis_order"])
+        if shape != (int(self.grid["ny"]), int(self.grid["nr"]), int(self.grid["nphi"])):
+            raise ValueError(
+                f"{json_path}: array_layout.shape={shape} is inconsistent with grid ny/nr/nphi."
+            )
+        if axis_order != ("y", "r", "phi"):
+            raise ValueError(f"{json_path}: unsupported axis_order={axis_order}; expected ('y','r','phi').")
+        if self.array_layout.get("flatten_order", "C") != "C":
+            raise ValueError(f"{json_path}: only C flatten_order is supported.")
+
+        self.shape = shape
+        self.ny, self.nr, self.nphi = shape
+        self.r_min = float(self.grid["r_min_m"])
+        self.r_max = float(self.grid["r_max_m"])
+        self.dr = float(self.grid["dr_m"])
+        self.phi_min_deg = float(self.grid["phi_min_deg"])
+        self.phi_max_deg = float(self.grid["phi_max_deg"])
+        self.dphi_deg = float(self.grid["dphi_deg"])
+        self.y_min = float(self.grid["y_min_m"])
+        self.y_max = float(self.grid["y_max_m"])
+        self.dy = float(self.grid["dy_m"])
+        self.model_origin_radius_m = float(self.coordinate_system["model_origin_radius_m"])
+        self.model_origin_azimuth_deg = float(self.coordinate_system["model_origin_azimuth_deg"])
+
+    def make_axes(self):
+        r_axis = np.arange(self.r_min, self.r_max + self.dr / 2.0, self.dr, dtype=np.float64)
+        phi_axis_deg = np.arange(
+            self.phi_min_deg,
+            self.phi_max_deg + self.dphi_deg / 2.0,
+            self.dphi_deg,
+            dtype=np.float64,
+        )
+        y_axis = np.arange(self.y_min, self.y_max + self.dy / 2.0, self.dy, dtype=np.float64)
+        if len(y_axis) != self.ny or len(r_axis) != self.nr or len(phi_axis_deg) != self.nphi:
+            raise ValueError(
+                "Axis lengths generated from min/max/step are inconsistent with metadata shape: "
+                f"generated {(len(y_axis), len(r_axis), len(phi_axis_deg))}, expected {self.shape}."
+            )
+        return y_axis, r_axis, phi_axis_deg, np.deg2rad(phi_axis_deg)
+
+    def describe(self):
+        return {
+            "json_path": self.json_path,
+            "shape": self.shape,
+            "r_range_m": (self.r_min, self.r_max, self.dr),
+            "phi_range_deg": (self.phi_min_deg, self.phi_max_deg, self.dphi_deg),
+            "y_range_m": (self.y_min, self.y_max, self.dy),
+            "model_origin_radius_m": self.model_origin_radius_m,
+            "model_origin_azimuth_deg": self.model_origin_azimuth_deg,
+            "array_layout": self.array_layout,
+        }
+
+
+class FFAG_Bfield_3D_opera:
+    """
+    Runtime OPERA 3D field-map loader for PyFFA tracking.
+
+    This class consumes the normalized PyFFA data structure documented in
+    OPERA_3D_FIELD_DATA_GUIDE_CN_GENERIC.md. It reads metadata from ``FD16.json``
+    and field arrays from ``FD16.npz``. The original OPERA ``.TABLE`` file is
+    not used during tracking.
+    """
+
+    def __init__(
+            self,
+            field_dir="OperaFieldMap",
+            dataset=None,
+            json_path=None,
+            npz_path=None,
+            nsectors=None,
+            dtype=np.float64,
+    ):
+        self.field_dir = field_dir
+        if dataset is None:
+            dataset = self.discover_dataset(field_dir, json_path=json_path, npz_path=npz_path)
+        self.dataset = dataset
+        self.json_path = json_path or os.path.join(field_dir, f"{dataset}.json")
+        self.npz_path = npz_path or os.path.join(field_dir, f"{dataset}.npz")
+        self.metadata = Opera3DFieldMapMetadata(self.json_path)
+
+        self.field_type = "opera3d"
+        if nsectors is None:
+            nsectors = self.infer_nsectors(self.metadata, dataset)
+        self.Nsectors = int(nsectors)
+        self.max_order = 0
+        self.flag3D = True
+        self.BmapFoldName = os.path.abspath(field_dir)
+        self._phi_table_buffer = None
+        self.model_origin_radius_m = self.metadata.model_origin_radius_m
+        self.model_origin_phi_rad = np.deg2rad(self.metadata.model_origin_azimuth_deg)
+
+        self.y_axis, self.r_axis, self.phi_axis_deg, self.phi_axis_rad = self.metadata.make_axes()
+
+        self.r_min = float(self.r_axis[0])
+        self.r_max = float(self.r_axis[-1])
+        self.r_step = float(self.r_axis[1] - self.r_axis[0])
+        self.fi_min = float(self.phi_axis_rad[0])
+        self.fi_max = float(self.phi_axis_rad[-1])
+        self.fi_step = float(self.phi_axis_rad[1] - self.phi_axis_rad[0])
+        self.y_min = float(self.y_axis[0])
+        self.y_max = float(self.y_axis[-1])
+        self.y_step = float(self.y_axis[1] - self.y_axis[0])
+        self.r_size = len(self.r_axis)
+        self.fi_size = len(self.phi_axis_rad)
+        self.y_size = len(self.y_axis)
+        self.Binf = 6.0
+
+        self.br_map, self.bfi_map, self.bz_map = self._load_npz(dtype)
+
+        self.Bmean = np.mean(self.bz_map[0], axis=1)
+        self.r_axis_Bmean = self.r_axis
+        self.f1 = interp1d(self.r_axis, self.Bmean, kind="linear", fill_value="extrapolate")
+
+        if MPI.COMM_WORLD.Get_rank() == 0:
+            print(f"[Bmap3D-opera] metadata : {self.json_path}")
+            print(f"[Bmap3D-opera] field npz: {self.npz_path}")
+            print(f"[Bmap3D-opera] shape    : {self.br_map.shape} = (y, r, phi)")
+            print(f"[Bmap3D-opera] r range  : {self.r_min:.4f} m to {self.r_max:.4f} m")
+            print(f"[Bmap3D-opera] phi range: {np.rad2deg(self.fi_min):.4f} deg to "
+                  f"{np.rad2deg(self.fi_max):.4f} deg")
+            print(f"[Bmap3D-opera] y range  : +/-{self.y_max:.4f} m by mid-plane symmetry")
+
+    @staticmethod
+    def discover_dataset(field_dir, json_path=None, npz_path=None):
+        if json_path is not None and npz_path is not None:
+            json_base = os.path.splitext(os.path.basename(json_path))[0]
+            npz_base = os.path.splitext(os.path.basename(npz_path))[0]
+            if json_base != npz_base:
+                raise ValueError(f"OPERA json/npz dataset names differ: {json_base!r} vs {npz_base!r}.")
+            return json_base
+
+        if json_path is not None:
+            return os.path.splitext(os.path.basename(json_path))[0]
+        if npz_path is not None:
+            return os.path.splitext(os.path.basename(npz_path))[0]
+
+        if not os.path.isdir(field_dir):
+            raise FileNotFoundError(f"OPERA 3D field directory does not exist: {field_dir}")
+
+        json_bases = {
+            os.path.splitext(name)[0]
+            for name in os.listdir(field_dir)
+            if name.lower().endswith(".json")
+        }
+        npz_bases = {
+            os.path.splitext(name)[0]
+            for name in os.listdir(field_dir)
+            if name.lower().endswith(".npz")
+        }
+        datasets = sorted(json_bases & npz_bases)
+        if not datasets:
+            raise FileNotFoundError(
+                f"Cannot find a matching OPERA 3D .json/.npz dataset pair in {field_dir}."
+            )
+        if len(datasets) > 1:
+            raise ValueError(
+                f"Multiple OPERA 3D datasets found in {field_dir}: {datasets}. "
+                "Keep one dataset per folder or pass dataset explicitly."
+            )
+        return datasets[0]
+
+    @staticmethod
+    def infer_nsectors(metadata, dataset):
+        phi_span_deg = metadata.phi_max_deg - metadata.phi_min_deg
+        if phi_span_deg > 0.0:
+            nsectors = int(round(360.0 / phi_span_deg))
+            if nsectors > 0 and abs(360.0 / nsectors - phi_span_deg) <= max(metadata.dphi_deg, 1e-9):
+                return nsectors
+
+        match = re.search(r"(\d+)$", str(dataset))
+        if match:
+            return int(match.group(1))
+
+        raise ValueError(
+            "Cannot infer OPERA 3D sector count. Add it to metadata or pass nsectors explicitly."
+        )
+
+    def _load_npz(self, dtype):
+        if not os.path.exists(self.npz_path):
+            raise FileNotFoundError(
+                f"Cannot find {self.npz_path}. Convert the OPERA TABLE to npz before tracking."
+            )
+
+        required = ("y_axis", "r_axis", "phi_axis_rad", "br", "bphi", "bz")
+        with np.load(self.npz_path) as data:
+            missing = [key for key in required if key not in data.files]
+            if missing:
+                raise KeyError(f"{self.npz_path} is missing required arrays: {missing}")
+
+            self._validate_npz_axes(data["y_axis"], data["r_axis"], data["phi_axis_rad"])
+
+            br = np.ascontiguousarray(data["br"].astype(dtype, copy=False))
+            bfi = np.ascontiguousarray(data["bphi"].astype(dtype, copy=False))
+            bz = np.ascontiguousarray(data["bz"].astype(dtype, copy=False))
+
+        expected_shape = (self.y_size, self.r_size, self.fi_size)
+        if br.shape != expected_shape or bfi.shape != expected_shape or bz.shape != expected_shape:
+            raise ValueError(
+                f"{self.npz_path}: field array shapes must be {expected_shape}, got "
+                f"br={br.shape}, bphi={bfi.shape}, bz={bz.shape}."
+            )
+        return br, bfi, bz
+
+    def _validate_npz_axes(self, y_axis, r_axis, phi_axis_rad):
+        if not np.allclose(y_axis, self.y_axis):
+            raise ValueError(f"{self.npz_path}: y_axis is inconsistent with {self.json_path}.")
+        if not np.allclose(r_axis, self.r_axis):
+            raise ValueError(f"{self.npz_path}: r_axis is inconsistent with {self.json_path}.")
+        if not np.allclose(phi_axis_rad, self.phi_axis_rad):
+            raise ValueError(f"{self.npz_path}: phi_axis_rad is inconsistent with {self.json_path}.")
+
+    def _map_phi_to_table(self, fi):
+        if self._phi_table_buffer is None or self._phi_table_buffer.shape != fi.shape:
+            self._phi_table_buffer = np.empty_like(fi, dtype=np.float64)
+        sector_period = 2.0 * np.pi / self.Nsectors
+        map_global_phi_to_table_njit(fi, self.fi_min, sector_period, self._phi_table_buffer)
+        return self._phi_table_buffer
+
+    def GetBfields(self, r, fi, z, Inj_flag, Survive_flag, Bz, Br, Bfi, SearchMod=False):
+        phi_table = self._map_phi_to_table(fi)
+        interpolate_3d_table_field_njit(
+            r, phi_table, z, Inj_flag, Survive_flag,
+            self.r_min, self.r_step, self.r_size,
+            self.fi_min, self.fi_step, self.fi_size,
+            self.y_min, self.y_step, self.y_size,
+            self.br_map, self.bfi_map, self.bz_map,
+            Bz, Br, Bfi
+        )
+        return Bz, Br, Bfi
+
+    def GetBz(self, r, fi, SearchMod=False, z=None):
+        z_query = 0.0 if z is None else z
+        r_arr, fi_arr, z_arr = np.broadcast_arrays(
+            np.asarray(r, dtype=np.float64),
+            np.asarray(fi, dtype=np.float64),
+            np.asarray(z_query, dtype=np.float64),
+        )
+        out_shape = r_arr.shape
+        r_flat = np.array(r_arr.ravel(), dtype=np.float64, copy=True)
+        fi_flat = np.array(fi_arr.ravel(), dtype=np.float64, copy=True)
+        z_flat = np.array(z_arr.ravel(), dtype=np.float64, copy=True)
+        inj = np.ones_like(r_flat, dtype=np.bool_)
+        survive = np.ones_like(r_flat, dtype=np.bool_)
+        bz = np.zeros_like(r_flat, dtype=np.float64)
+        br = np.zeros_like(r_flat, dtype=np.float64)
+        bfi = np.zeros_like(r_flat, dtype=np.float64)
+        self.GetBfields(r_flat, fi_flat, z_flat, inj, survive, bz, br, bfi, SearchMod=False)
+        if SearchMod:
+            mask_low = r_flat < self.r_min
+            mask_high = r_flat > self.r_max
+            bz[mask_low] = -self.Binf
+            bz[mask_high] = self.Binf
+        bz = bz.reshape(out_shape)
+        if bz.shape == ():
+            return float(bz)
+        return bz
+
+    def AddHigherOrderBmaps(self, r, fi, z, Bz0, Br, Bfi, max_order):
+        return
+
+    def describe(self):
+        info = self.metadata.describe()
+        info.update({
+            "field_type": self.field_type,
+            "field_dir": self.field_dir,
+            "dataset": self.dataset,
+            "npz_path": self.npz_path,
+            "nsectors": self.Nsectors,
+            "Bz_midplane_absmax_T": float(np.max(np.abs(self.bz_map[0]))),
+            "Br_midplane_absmax_T": float(np.max(np.abs(self.br_map[0]))),
+            "Bfi_midplane_absmax_T": float(np.max(np.abs(self.bfi_map[0]))),
+        })
+        return info
 
 
 class FFAG_BField_Error:
@@ -1038,6 +1287,76 @@ class FFAG_BField_Error:
             r_arr, phi_arr, z_arr,
             self.m_arr, self.amp_arr, self.phase_arr,
             self.rmin_arr, self.rmax_arr,
+            Bz_out, Br_out, Bfi_out
+        )
+
+
+class FFAG_BumpKickerField:
+    """
+    Local hard-edge bump/extraction kicker in global azimuth coordinates.
+
+    Each kicker superposes constant cylindrical field components on the main
+    magnetic field inside its configured radial and azimuthal ranges. The
+    field is not sector-periodic: callers must pass the full/global particle
+    azimuth rather than the main Bmap's cell-folded azimuth.
+
+    Required per-kicker keys:
+        phi_start_deg : start azimuth in degrees
+        phi_span_deg  : azimuth span in degrees
+        BL_Tm         : integrated vertical field in T*m
+        L_eff_m       : effective magnetic length in m
+        sign          : polarity multiplier, normally +1 or -1
+        rmin_m/rmax_m : active radial range in m
+
+    Optional keys Br_T and Bfi_T add constant radial and azimuthal components;
+    both default to zero. The default model therefore adds Bz only, with
+    Bz = sign * BL_Tm / L_eff_m.
+    """
+
+    def __init__(self, kicker_cfg, EnableFlag):
+        self.kicker_cfg = kicker_cfg
+        self.enable_flag = EnableFlag
+
+        Nkicker = len(kicker_cfg)
+        self.Nkicker = Nkicker
+
+        self.phi_start_arr = np.empty(Nkicker, dtype=np.float64)
+        self.phi_span_arr = np.empty(Nkicker, dtype=np.float64)
+        self.rmin_arr = np.empty(Nkicker, dtype=np.float64)
+        self.rmax_arr = np.empty(Nkicker, dtype=np.float64)
+        self.Bz_arr = np.empty(Nkicker, dtype=np.float64)
+        self.Br_arr = np.empty(Nkicker, dtype=np.float64)
+        self.Bfi_arr = np.empty(Nkicker, dtype=np.float64)
+
+        for idx, kicker in enumerate(kicker_cfg):
+            phi_start = np.deg2rad(float(kicker["phi_start_deg"]))
+            phi_span = np.deg2rad(float(kicker["phi_span_deg"]))
+            sign = float(kicker["sign"])
+            BL_Tm = float(kicker["BL_Tm"])
+            L_eff_m = float(kicker["L_eff_m"])
+            Bz_T = sign * BL_Tm / L_eff_m
+
+            self.phi_start_arr[idx] = phi_start
+            self.phi_span_arr[idx] = phi_span
+            self.rmin_arr[idx] = float(kicker["rmin_m"])
+            self.rmax_arr[idx] = float(kicker["rmax_m"])
+            self.Bz_arr[idx] = Bz_T
+            self.Br_arr[idx] = float(kicker.get("Br_T", 0.0))
+            self.Bfi_arr[idx] = float(kicker.get("Bfi_T", 0.0))
+
+    def AddBumpKicker_to_Bmap_njit(self, r_arr, phi_arr, z_arr,
+                                   Inj_flag, Survive_flag,
+                                   Bz_out, Br_out, Bfi_out):
+        """Add the configured local kicker fields to output arrays in place."""
+        if not self.enable_flag:
+            return
+
+        bump_kicker_kernel_1d(
+            r_arr, phi_arr, z_arr,
+            Inj_flag, Survive_flag,
+            self.phi_start_arr, self.phi_span_arr,
+            self.rmin_arr, self.rmax_arr,
+            self.Bz_arr, self.Br_arr, self.Bfi_arr,
             Bz_out, Br_out, Bfi_out
         )
 
@@ -1538,6 +1857,126 @@ def GetBfields_Njit(r, fi, z, Inj_flag, Survive_flag,
 #
 #     return Bz, Br, Bfi
 
+@nb.njit(parallel=True)
+def map_global_phi_to_table_njit(fi, phi_min, sector_period, phi_table):
+    for i in nb.prange(fi.size):
+        x = fi[i] - phi_min
+        phi_table[i] = phi_min + x - sector_period * np.floor(x / sector_period)
+
+
+@nb.njit(parallel=True)
+def interpolate_3d_table_field_njit(r, phi, z, Inj_flag, Survive_flag,
+                                    r0, dr, nr,
+                                    phi0, dphi, nphi,
+                                    y0, dy, ny,
+                                    br_map, bfi_map, bz_map,
+                                    Bz_out, Br_out, Bfi_out):
+    n = r.shape[0]
+
+    for p in nb.prange(n):
+        if Inj_flag[p] != 1 or Survive_flag[p] != 1:
+            Bz_out[p] = 0.0
+            Br_out[p] = 0.0
+            Bfi_out[p] = 0.0
+            continue
+
+        rp = r[p]
+        phip = phi[p]
+        zp = z[p]
+
+        # The tracking field is defined only through the outermost OPERA
+        # radial plane.  Do not clamp particles beyond the map to the last
+        # radial slice: outside r_max all three field components are zero.
+        if rp > r0 + dr * (nr - 1):
+            Bz_out[p] = 0.0
+            Br_out[p] = 0.0
+            Bfi_out[p] = 0.0
+            continue
+
+        sign_z = 1.0
+        if zp < 0.0:
+            sign_z = -1.0
+            zp = -zp
+
+        ir = int((rp - r0) / dr)
+        if ir < 0:
+            ir = 0
+            tr = 0.0
+        elif ir >= nr - 1:
+            ir = nr - 2
+            tr = 1.0
+        else:
+            tr = (rp - (r0 + ir * dr)) / dr
+
+        ip = int((phip - phi0) / dphi)
+        if ip < 0:
+            ip = 0
+            tp = 0.0
+        elif ip >= nphi - 1:
+            ip = nphi - 2
+            tp = 1.0
+        else:
+            tp = (phip - (phi0 + ip * dphi)) / dphi
+
+        iy = int((zp - y0) / dy)
+        if iy < 0:
+            iy = 0
+            ty = 0.0
+        elif iy >= ny - 1:
+            iy = ny - 2
+            ty = 1.0
+        else:
+            ty = (zp - (y0 + iy * dy)) / dy
+
+        ir1 = ir + 1
+        ip1 = ip + 1
+        iy1 = iy + 1
+
+        wr0 = 1.0 - tr
+        wr1 = tr
+        wp0 = 1.0 - tp
+        wp1 = tp
+        wy0 = 1.0 - ty
+        wy1 = ty
+
+        br_val = 0.0
+        bfi_val = 0.0
+        bz_val = 0.0
+
+        for yy in range(2):
+            if yy == 0:
+                iyq = iy
+                wy = wy0
+            else:
+                iyq = iy1
+                wy = wy1
+
+            for rr in range(2):
+                if rr == 0:
+                    irq = ir
+                    wr = wr0
+                else:
+                    irq = ir1
+                    wr = wr1
+
+                for pp in range(2):
+                    if pp == 0:
+                        ipq = ip
+                        wp = wp0
+                    else:
+                        ipq = ip1
+                        wp = wp1
+
+                    w = wy * wr * wp
+                    br_val += w * br_map[iyq, irq, ipq]
+                    bfi_val += w * bfi_map[iyq, irq, ipq]
+                    bz_val += w * bz_map[iyq, irq, ipq]
+
+        Br_out[p] = sign_z * br_val
+        Bfi_out[p] = sign_z * bfi_val
+        Bz_out[p] = bz_val
+
+
 @nb.njit()
 def bharmonics_kernel_1d(r_arr, phi_arr, z_arr,
                           m_arr, amp_arr, phase_arr,
@@ -1581,6 +2020,52 @@ def bharmonics_kernel_1d(r_arr, phi_arr, z_arr,
 
                 # Bfi (一阶，关键)
                 # Bfi += -(z / r) * m * A * s
+
+        Bz_out[i] += Bz
+        Br_out[i] += Br
+        Bfi_out[i] += Bfi
+
+
+@nb.njit()
+def bump_kicker_kernel_1d(r_arr, phi_arr, z_arr,
+                          Inj_flag, Survive_flag,
+                          phi_start_arr, phi_span_arr,
+                          rmin_arr, rmax_arr,
+                          Bz_arr, Br_arr, Bfi_arr,
+                          Bz_out, Br_out, Bfi_out):
+    """
+    Add hard-edge local kicker fields using global azimuth coordinates.
+
+    The azimuth test is periodic over a full turn but is not repeated for each
+    lattice sector. z_arr is accepted for a field-adder interface consistent
+    with other magnetic sources; this hard-edge model has no vertical cutoff.
+    """
+    N = r_arr.shape[0]
+    Nk = phi_start_arr.shape[0]
+    two_pi = 2.0 * np.pi
+
+    for i in range(N):
+        if Inj_flag[i] != 1 or Survive_flag[i] != 1:
+            continue
+
+        r = r_arr[i]
+        phi = phi_arr[i]
+
+        Bz = 0.0
+        Br = 0.0
+        Bfi = 0.0
+
+        for k in range(Nk):
+            if r < rmin_arr[k] or r > rmax_arr[k]:
+                continue
+
+            dphi = phi - phi_start_arr[k]
+            dphi = dphi - two_pi * np.floor(dphi / two_pi)
+
+            if 0.0 <= dphi <= phi_span_arr[k]:
+                Bz += Bz_arr[k]
+                Br += Br_arr[k]
+                Bfi += Bfi_arr[k]
 
         Bz_out[i] += Bz
         Br_out[i] += Br

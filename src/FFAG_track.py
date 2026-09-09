@@ -30,22 +30,22 @@ class FFAG_RungeKutta:
     def __init__(self):
         self.running = True
 
-    def rk4_step(self, func, t, r, h, GlobalParameters):
+    def rk4_step(self, func, t, r, h, GlobalParameters, return_bfield=False):
         # shape of r = number of particles * number of coordinates
+        if return_bfield:
+            f1 = func(t, r, GlobalParameters, return_bfield=True)
+            k1 = h * f1[0]
+            k2 = h * func(t + 0.5 * h, r + 0.5 * k1, GlobalParameters)
+            k3 = h * func(t + 0.5 * h, r + 0.5 * k2, GlobalParameters)
+            k4 = h * func(t + h, r + k3, GlobalParameters)
+            return (k1 + 2 * k2 + 2 * k3 + k4) / 6, f1[1], f1[2], f1[3]
+
         k1 = h * func(t, r, GlobalParameters)
         k2 = h * func(t + 0.5 * h, r + 0.5 * k1, GlobalParameters)
         k3 = h * func(t + 0.5 * h, r + 0.5 * k2, GlobalParameters)
         k4 = h * func(t + h, r + k3, GlobalParameters)
         # shape of k1,...,k4 = n*7
         return (k1 + 2 * k2 + 2 * k3 + k4) / 6
-
-    def rk4_step_2(self, func, t, r, h, GlobalParameters):
-        k1 = h * func(t, r, GlobalParameters)[0]
-        k2 = h * func(t + 0.5 * h, r + 0.5 * k1, GlobalParameters)[0]
-        k3 = h * func(t + 0.5 * h, r + 0.5 * k2, GlobalParameters)[0]
-        k4 = h * func(t + h, r + k3, GlobalParameters)[0]
-        _, Bz_ThisStep, Br_ThisStep, Bfi_ThisStep = func(t, r, GlobalParameters)
-        return (k1 + 2 * k2 + 2 * k3 + k4) / 6, Bz_ThisStep, Br_ThisStep, Bfi_ThisStep
 
     # @profile
     def rk4_step_malloc(self, func, t, r, h, GlobalParameters,
@@ -83,17 +83,16 @@ class FFAG_RungeKutta:
         t_PreStep, steps_i = t_start, 0
         ExitLoopFlag = False
 
-        # FFTW plan
-        NZ, NX, NF = BunchObj.z_grid_size, BunchObj.x_grid_size, BunchObj.f_grid_size
-        pyfftw.interfaces.cache.enable()
-        a_buf = pyfftw.empty_aligned((NZ, NX), dtype='complex64')
-        b_buf = pyfftw.empty_aligned((NZ, NX), dtype='complex64')
-        fft_fwd = pyfftw.FFTW(a_buf, b_buf, axes=(0, 1),
-                              direction='FFTW_FORWARD',
-                              threads=1, flags=('FFTW_MEASURE',))
-        fft_inv = pyfftw.FFTW(b_buf, a_buf, axes=(0, 1),
-                              direction='FFTW_BACKWARD',
-                              threads=1, flags=('FFTW_MEASURE',))
+        # Padded FFTW plans for the open-boundary transverse SC solver
+        NZ, NX = BunchObj.z_grid_size, BunchObj.x_grid_size
+        a_buf = pyfftw.empty_aligned((2 * NZ, 2 * NX), dtype='complex64')
+        b_buf = pyfftw.empty_aligned((2 * NZ, 2 * NX), dtype='complex64')
+        fft_fwd_pad = pyfftw.FFTW(a_buf, b_buf, axes=(0, 1),
+                                  direction='FFTW_FORWARD',
+                                  threads=1, flags=('FFTW_MEASURE',))
+        fft_inv_pad = pyfftw.FFTW(b_buf, a_buf, axes=(0, 1),
+                                  direction='FFTW_BACKWARD',
+                                  threads=1, flags=('FFTW_MEASURE',))
 
         # start tracking
         while steps_i < max_stepsN:
@@ -117,8 +116,8 @@ class FFAG_RungeKutta:
                             _, _, _, _, _, _, _, _ = (
                                 Bunch_SC_Calculator(BunchObj))
                         elif SC_type == 1:
-                            # 计算2.5D空间电荷电场
-                            BunchObj.Build_2_5D_SliceGrid_sbs(fft_fwd, fft_inv)
+                            # 计算2.5D空间电荷电场 — fixProjection 求解器
+                            BunchObj.Build_2_5D_SliceGrid_sbs_new_fixProjection(fft_fwd_pad, fft_inv_pad)
                             alive_now = (BunchObj.LocalBunch[:, 8] != 0)
                             # ===== 初始化 =====
                             if steps_i == 0:
@@ -147,7 +146,7 @@ class FFAG_RungeKutta:
                                 BunchObj.Malloc_SC_Ez_Pre[alive_now] = BunchObj.LocalBunch[alive_now, 11]
                                 BunchObj.Malloc_SC_Ef_Pre[alive_now] = BunchObj.LocalBunch[alive_now, 12]
                         elif SC_type == 2:
-                            BunchObj.Build_2_5D_SliceGrid_sbs_LinearFast(fft_fwd, fft_inv)
+                            BunchObj.Build_2_5D_SliceGrid_sbs_GaussianToy()
                             alive_now = (BunchObj.LocalBunch[:, 8] != 0)
                             # ===== 初始化 =====
                             if steps_i == 0:
@@ -315,17 +314,16 @@ class FFAG_RungeKutta:
         t_PreStep, steps_i = t_start, 0
         ExitLoopFlag = False
 
-        # FFTW plan
-        NZ, NX, NF = BunchObj.z_grid_size, BunchObj.x_grid_size, BunchObj.f_grid_size
-        pyfftw.interfaces.cache.enable()
-        a_buf = pyfftw.empty_aligned((NZ, NX), dtype='complex64')
-        b_buf = pyfftw.empty_aligned((NZ, NX), dtype='complex64')
-        fft_fwd = pyfftw.FFTW(a_buf, b_buf, axes=(0, 1),
-                              direction='FFTW_FORWARD',
-                              threads=1, flags=('FFTW_MEASURE',))
-        fft_inv = pyfftw.FFTW(b_buf, a_buf, axes=(0, 1),
-                              direction='FFTW_BACKWARD',
-                              threads=1, flags=('FFTW_MEASURE',))
+        # Padded FFTW plans for the open-boundary transverse SC solver
+        NZ, NX = BunchObj.z_grid_size, BunchObj.x_grid_size
+        a_buf = pyfftw.empty_aligned((2 * NZ, 2 * NX), dtype='complex64')
+        b_buf = pyfftw.empty_aligned((2 * NZ, 2 * NX), dtype='complex64')
+        fft_fwd_pad = pyfftw.FFTW(a_buf, b_buf, axes=(0, 1),
+                                  direction='FFTW_FORWARD',
+                                  threads=1, flags=('FFTW_MEASURE',))
+        fft_inv_pad = pyfftw.FFTW(b_buf, a_buf, axes=(0, 1),
+                                  direction='FFTW_BACKWARD',
+                                  threads=1, flags=('FFTW_MEASURE',))
 
         # start tracking
         while steps_i < max_stepsN:
@@ -349,9 +347,8 @@ class FFAG_RungeKutta:
                             _, _, _, _, _, _, _, _ = (
                                 Bunch_SC_Calculator(BunchObj))
                         elif SC_type ==1:
-                            pass
-                            # 计算2.5D空间电荷电场
-                            BunchObj.Build_2_5D_SliceGrid_sbs(fft_fwd, fft_inv)
+                            # 计算2.5D空间电荷电场 — fixProjection 求解器
+                            BunchObj.Build_2_5D_SliceGrid_sbs_new_fixProjection(fft_fwd_pad, fft_inv_pad)
 
                             alive_now = (BunchObj.LocalBunch[:, 8] != 0)
                             # ===== 初始化 =====
@@ -384,7 +381,8 @@ class FFAG_RungeKutta:
                         elif SC_type == 2:
                             pass
                             # 计算2.5D空间电荷电场
-                            BunchObj.Build_2_5D_SliceGrid_sbs_LinearFast(fft_fwd, fft_inv)
+                            BunchObj.Build_2_5D_SliceGrid_sbs_GaussianToy()
+
 
                             alive_now = (BunchObj.LocalBunch[:, 8] != 0)
                             # ===== 初始化 =====
@@ -666,7 +664,9 @@ class FFAG_RungeKutta:
             tr_points_ThisStep = np.column_stack((np.ones_like(r_PreStep[:, 0]) * t_PreStep, r_PreStep))
             tr_points_AllSteps = np.concatenate((tr_points_AllSteps, tr_points_ThisStep[np.newaxis, :, :]), axis=0)
 
-            dr_step, Bz_ThisStep, Br_ThisStep, Bfi_ThisStep = self.rk4_step_2(func, t_PreStep, r_PreStep, steps_real, GlobalParameters)
+            dr_step, Bz_ThisStep, Br_ThisStep, Bfi_ThisStep = self.rk4_step(
+                func, t_PreStep, r_PreStep, steps_real, GlobalParameters, return_bfield=True
+            )
 
             Bz_trajectory = np.hstack((Bz_trajectory, Bz_ThisStep.reshape(-1, 1)))
             Br_trajectory = np.hstack((Br_trajectory, Br_ThisStep.reshape(-1, 1)))
@@ -970,6 +970,7 @@ class FFAG_RungeKutta:
         Aperture_enable = GlobalParameters.Aperture_enable
         Aperture_m = GlobalParameters.Aperture_m
         BHarmonics = GlobalParameters.BHarmonics
+        BumpKickers = GlobalParameters.BumpKickers
 
         # 1) 解出列
 
@@ -999,12 +1000,24 @@ class FFAG_RungeKutta:
         # Bz0 += Bz_coef0
         # Br += Br_coef0 * z
         # Bfi += Bfi_coef0 * z
-        Bmap.GetBfields(r, fi_vect, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
-        if max_order >=1:
-            Bmap.AddHigherOrderBmaps(r, fi_vect, z, Bz0, Br, Bfi, max_order)
+        field_type = getattr(Bmap, "field_type", "analytical")
+        if field_type == "opera3d":
+            Bmap.GetBfields(r, fi, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
+        elif field_type == "analytical":
+            Bmap.GetBfields(r, fi_vect, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
+            if max_order >= 1:
+                Bmap.AddHigherOrderBmaps(r, fi_vect, z, Bz0, Br, Bfi, max_order)
+        else:
+            raise ValueError(f"Unsupported Bmap field_type: {field_type!r}")
 
         # 磁场误差谐波
         BHarmonics.AddBHarmonics_to_Bmap_njit(r, fi, z, Bz0, Br, Bfi)
+
+        # 非周期局部 bump/extraction kicker，必须使用全局方位角 fi
+        if BumpKickers is not None:
+            BumpKickers.AddBumpKicker_to_Bmap_njit(
+                r, fi, z, Inj_flag, Survive_flag, Bz0, Br, Bfi
+            )
 
         # 电场分量
         dRF_phase, v0_volt = Emap.Interpolation1D_freq_curve(t)
@@ -1595,149 +1608,88 @@ class FFAG_DynamicAperture:
 
 # @profile
 def FunctionForSEO(t, x, GlobalParameters):
-    q = GlobalParameters.q
-    dxdt = np.zeros(6)
-    Bmap = GlobalParameters.Bmap
-    BHarmonics = GlobalParameters.BHarmonics
-    NSectors=Bmap.Nsectors
-    fi = t % (np.pi * 2)
-    r, pr, z, pz, P, ParticleIndex = x[0], x[1], x[ 2], x[3], x[ 4], x[ 5]
-
-    r_vect = np.array([r,])
-    fi_vect = np.array([fi,])
-    fi_vect_mod = np.mod(fi_vect, 2*np.pi/NSectors)
-    z_vect = np.array([z, ])
-    Inj_flag = np.array([1,], dtype=bool)
-    Survive_flag = np.array([1,], dtype=bool)
-
-    if not Bmap.flag3D:
-        Bz0 = Bmap.GetBz(r_vect, fi_vect_mod, SearchMod = True)
-        Bfi = Bz0*0
-        Br = Bz0*0
-
-    else:
-        # Bz0 = Bmap.GetBz(r_vect, fi_vect_mod)
-        # Bfi = Bmap.GetBfi(r_vect, fi_vect_mod) * z_vect
-        # Br = Bmap.GetBr(r_vect, fi_vect_mod) * z_vect
-        Bz0, Bfi, Br = np.array([0.0,]), np.array([0.0,]), np.array([0.0,])
-        Bmap.GetBfields(r_vect, fi_vect_mod, z_vect, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
-
-    # harmonics of field error
-    BHarmonics.AddBHarmonics_to_Bmap_njit(r_vect, fi_vect, z_vect, Bz0, Br, Bfi)
-
-    pfi = np.sqrt((1 - pr ** 2 - pz ** 2))
-
-    dxdt[0] = r * pr / pfi
-    dxdt[1] = pfi - q / P * (r * Bz0 - r * pz / pfi * Bfi)
-    dxdt[2] = r * pz / pfi
-    dxdt[3] = q / P * (r * Br - r * pr / pfi * Bfi)
-    dxdt[4] = 0
-    dxdt[5] = 0
-
-    return dxdt
+    return FunctionForSEOUnified(t, x, GlobalParameters)
 
 
 # @profile
 def FunctionForSEOVect(t, x, GlobalParameters):
+    return FunctionForSEOUnified(t, x, GlobalParameters)
+
+
+def FunctionForSEOUnified(t, x, GlobalParameters, return_bfield=False):
+    """
+    Unified SEO right-hand side for single-particle and vectorized tracking.
+
+    The input state can be shape (6,) or (n, 6). By default the function
+    returns only dx/dphi, matching rk4_step/rk4_solve expectations. Set
+    return_bfield=True to also return the B-field arrays at the input state.
+    """
     q = GlobalParameters.q
-    nParticles = np.size(x, 0)  # 获取粒子数量
-    dxdt = np.zeros((nParticles, 6))
     Bmap = GlobalParameters.Bmap
-    NSectors = Bmap.Nsectors
-    max_order = Bmap.max_order
-    fi = np.ones(nParticles) * (t % (np.pi * 2))  # 为每个粒子生成相同的时间角度
     BHarmonics = GlobalParameters.BHarmonics
+    NSectors = Bmap.Nsectors
 
-    # 提取粒子状态
-    r, pr, z, pz, P, ParticleIndex = x[:, 0], x[:, 1], x[:, 2], x[:, 3], x[:, 4], x[:, 5]
-
-    # 调整角度以适应扇区数
-    fi_vect_mod = np.mod(fi, 2 * np.pi / NSectors)
-
-    # 初始化 Bz、Br 和 Bfi 分量
-    Bz0 = np.zeros_like(r)
-    Br = np.zeros_like(r)
-    Bfi = np.zeros_like(r)
-    Inj_flag, Survive_flag = np.ones_like(r, dtype=bool), np.ones_like(r, dtype=bool)
-
-
-    if not Bmap.flag3D:
-        Bz_coeff = Bmap.GetBz(r, fi_vect_mod, SearchMod = True)
-        # 只有Bz
-        Bz0 += Bz_coeff
+    x_arr = np.asarray(x)
+    single_particle = (x_arr.ndim == 1)
+    if single_particle:
+        x_work = x_arr.reshape(1, -1)
     else:
-        # Bz_coeff = Bmap.GetBz(r, fi_vect_mod, SearchMod = True)
-        # Br_coeff = Bmap.GetBr(r, fi_vect_mod, SearchMod = True) * z
-        # Bfi_coeff = Bmap.GetBfi(r, fi_vect_mod, SearchMod = True) * z
-        #
-        # Bz0 += Bz_coeff
-        # Br += Br_coeff
-        # Bfi += Bfi_coeff
+        x_work = x_arr
 
+    nParticles = np.size(x_work, 0)
+    dxdt = np.zeros((nParticles, 6), dtype=np.float64)
+
+    r = x_work[:, 0]
+    pr = x_work[:, 1]
+    z = x_work[:, 2]
+    pz = x_work[:, 3]
+    P = x_work[:, 4]
+
+    fi = np.ones(nParticles, dtype=np.float64) * (t % (2.0 * np.pi))
+    fi_vect_mod = np.mod(fi, 2.0 * np.pi / NSectors)
+
+    Bz0 = np.zeros_like(r, dtype=np.float64)
+    Br = np.zeros_like(r, dtype=np.float64)
+    Bfi = np.zeros_like(r, dtype=np.float64)
+    Inj_flag = np.ones_like(r, dtype=bool)
+    Survive_flag = np.ones_like(r, dtype=bool)
+
+    field_type = getattr(Bmap, "field_type", "analytical")
+    max_order = getattr(Bmap, "max_order", 0)
+    if field_type == "opera3d":
+        if (not return_bfield) and np.all(z == 0.0) and np.all(pz == 0.0):
+            Bz0 += Bmap.GetBz(r, fi, SearchMod=True, z=z)
+        else:
+            Bmap.GetBfields(r, fi, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
+    elif not Bmap.flag3D:
+        Bz_coeff = Bmap.GetBz(r, fi_vect_mod, SearchMod=True)
+        Bz0 += Bz_coeff
+    elif field_type == "analytical":
         Bmap.GetBfields(r, fi_vect_mod, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
+        if max_order >= 1:
+            Bmap.AddHigherOrderBmaps(r, fi_vect_mod, z, Bz0, Br, Bfi, max_order)
+    else:
+        raise ValueError(f"Unsupported Bmap field_type: {field_type!r}")
 
-    # 磁场误差谐波
-    BHarmonics.AddBHarmonics_to_Bmap_njit(r, fi, z, Bz0, Br, Bfi)
+    if BHarmonics is not None:
+        BHarmonics.AddBHarmonics_to_Bmap_njit(r, fi, z, Bz0, Br, Bfi)
 
-    # 动量分量 pfi
-    pfi = np.sqrt(1 - pr ** 2 - pz ** 2)
+    pfi = np.sqrt(1.0 - pr ** 2 - pz ** 2)
 
-    # 计算 dxdt 各分量
     dxdt[:, 0] = r * pr / pfi
     dxdt[:, 1] = pfi - q / P * (r * Bz0 - r * pz / pfi * Bfi)
     dxdt[:, 2] = r * pz / pfi
     dxdt[:, 3] = q / P * (r * Br - r * pr / pfi * Bfi)
-    dxdt[:, 4] = 0
-    dxdt[:, 5] = 0
+    dxdt[:, 4] = 0.0
+    dxdt[:, 5] = 0.0
 
+    if single_particle:
+        dxdt = dxdt[0]
+
+    if return_bfield:
+        return dxdt, Bz0, Br, Bfi
     return dxdt
 
-
-def FunctionForSEOVectBz(t, x, GlobalParameters):
-    q = GlobalParameters.q
-    nParticles = np.size(x, 0)  # 获取粒子数量
-    dxdt = np.zeros((nParticles, 6))
-    Bmap = GlobalParameters.Bmap
-    NSectors = Bmap.Nsectors
-    max_order = Bmap.max_order
-    fi = np.ones(nParticles) * (t % (np.pi * 2))  # 为每个粒子生成相同的时间角度
-
-    # 提取粒子状态
-    r, pr, z, pz, P, ParticleIndex = x[:, 0], x[:, 1], x[:, 2], x[:, 3], x[:, 4], x[:, 5]
-
-    # 调整角度以适应扇区数
-    fi_vect_mod = np.mod(fi, 2 * np.pi / NSectors)
-
-    # 初始化 Bz、Br 和 Bfi 分量
-    Bz0 = np.zeros_like(r)
-    Br = np.zeros_like(r)
-    Bfi = np.zeros_like(r)
-
-    if not Bmap.flag3D:
-        Bz_coeff = Bmap.GetBz(r, fi_vect_mod, SearchMod = False)
-        # 只有Bz
-        Bz0 += Bz_coeff
-    else:
-        Bz_coeff = Bmap.GetBz(r, fi_vect_mod, SearchMod = False)
-        Br_coeff = Bmap.GetBr(r, fi_vect_mod, SearchMod = False) * z
-        Bfi_coeff = Bmap.GetBfi(r, fi_vect_mod, SearchMod = False) * z
-
-        Bz0 += Bz_coeff
-        Br += Br_coeff
-        Bfi += Bfi_coeff
-
-    # 动量分量 pfi
-    pfi = np.sqrt(1 - pr ** 2 - pz ** 2)
-
-    # 计算 dxdt 各分量
-    dxdt[:, 0] = r * pr / pfi
-    dxdt[:, 1] = pfi - q / P * (r * Bz0 - r * pz / pfi * Bfi)
-    dxdt[:, 2] = r * pz / pfi
-    dxdt[:, 3] = q / P * (r * Br - r * pr / pfi * Bfi)
-    dxdt[:, 4] = 0
-    dxdt[:, 5] = 0
-
-    return dxdt, Bz0, Br, Bfi
 
 # @profile
 def FunctionForAccelerationBunch_dt(t, mat_in,
@@ -1770,16 +1722,29 @@ def FunctionForAccelerationBunch_dt(t, mat_in,
     NSectors = Bmap.Nsectors
     max_order = Bmap.max_order
     BHarmonics = GlobalParameters.BHarmonics
+    BumpKickers = GlobalParameters.BumpKickers
 
     # fi_vect = fi % (np.pi * 2 / NSectors)
     fast_mod_parallel(fi, (np.pi * 2 / NSectors), fi_vect)
 
-    Bmap.GetBfields(r, fi_vect, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
-    if max_order >= 1:
-        Bmap.AddHigherOrderBmaps(r, fi_vect, z, Bz0, Br, Bfi, max_order)
+    field_type = getattr(Bmap, "field_type", "analytical")
+    if field_type == "opera3d":
+        Bmap.GetBfields(r, fi, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
+    elif field_type == "analytical":
+        Bmap.GetBfields(r, fi_vect, z, Inj_flag, Survive_flag, Bz0, Br, Bfi, SearchMod=False)
+        if max_order >= 1:
+            Bmap.AddHigherOrderBmaps(r, fi_vect, z, Bz0, Br, Bfi, max_order)
+    else:
+        raise ValueError(f"Unsupported Bmap field_type: {field_type!r}")
 
     # 磁场误差谐波
     BHarmonics.AddBHarmonics_to_Bmap_njit(r, fi, z, Bz0, Br, Bfi)
+
+    # 非周期局部 bump/extraction kicker，必须使用全局方位角 fi
+    if BumpKickers is not None:
+        BumpKickers.AddBumpKicker_to_Bmap_njit(
+            r, fi, z, Inj_flag, Survive_flag, Bz0, Br, Bfi
+        )
 
     # 电场分量
     dRF_phase, v0_volt = Emap.Interpolation1D_freq_curve(t)

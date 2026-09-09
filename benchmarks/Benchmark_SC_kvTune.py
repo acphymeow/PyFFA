@@ -45,19 +45,20 @@ T   = 300.0
 Qx0 = 3.23
 Qy0 = 2.80
 
-N_tot = 2.0e13
+N_tot = 2.08e13
 
 # 这里仍沿用你原始变量名。
 # 在本脚本中，它被解释为纵向高斯分布的 full length = ±nsigma sigma_s 总长度
 L_long_uniform = 12.0
 
-eps_x_rms = 70.0e-6
-eps_y_rms = 70.0e-6
+eps_x_rms = 50.0e-6
+eps_y_rms = 50.0e-6
 nsigma = 4.0
 
+FigText='b'
 # ---------- FFT 实际 tune ----------
 # DATA_DIR0 = "../output/benchmark_SC_tune_kvAna/kv90"
-DATA_DIR0 = "../output/NewBenchmark/FFT_Tune_kv70"
+DATA_DIR0 = "../output/NewBenchmark/FFT_Tune_kv50"
 
 # SEO_r_filepath  = "./Bmap/resultsSEO/SEO_r.txt"
 # SEO_pr_filepath = "./Bmap/resultsSEO/SEO_pr.txt"
@@ -475,8 +476,6 @@ def compute_fft_tunes():
     qx_all, qy_all = np.array(pairs).T
 
     print(f"成功提取 FFT tune 粒子数: {len(qx_all)}")
-    print(f"Qx FFT min / mean / max = {qx_all.min():.8f}, {qx_all.mean():.8f}, {qx_all.max():.8f}")
-    print(f"Qy FFT min / mean / max = {qy_all.min():.8f}, {qy_all.mean():.8f}, {qy_all.max():.8f}")
 
     return qx_all, qy_all
 
@@ -550,18 +549,6 @@ def plot_compare_with_theory_distribution(theory_dict, qx_all, qy_all):
         cbar.set_label("Counts", fontsize=19)
         cbar.ax.tick_params(labelsize=14)
 
-    # # 理论解析工作点分布：沿直线分布
-    # ax.scatter(
-    #     qx_th,
-    #     qy_th,
-    #     s=5,
-    #     c="red",
-    #     alpha=0.08,
-    #     linewidths=0,
-    #     label="Analytical distribution",
-    #     zorder=6
-    # )
-
     # 理论解析直线
     umin = np.exp(-0.5 * nsigma * nsigma)
     u_line = np.linspace(umin, 1.0, 500)
@@ -605,170 +592,32 @@ def plot_compare_with_theory_distribution(theory_dict, qx_all, qy_all):
         label="Theoretic max SC tune shift"
     )
 
-    # ax.plot(
-    #     [Qx0, Qx_max],
-    #     [Qy0, Qy_max],
-    #     "-",
-    #     color="red",
-    #     lw=1.8,
-    #     alpha=0.75,
-    #     zorder=7
-    # )
+    ax.text(
+        0.04, 0.94,
+        rf"({FigText})",
+        transform=ax.transAxes,
+        fontsize=30,
+        fontweight="bold",
+        va="top",
+        ha="left",
+        bbox=dict(
+            facecolor="white",
+            edgecolor="none",
+            alpha=0.75,
+            pad=2.0
+        ),
+        zorder=20
+    )
 
     ax.set_xlabel("Qx")
     ax.set_ylabel("Qz")
-    # ax.set_title("Working-point footprint")
-    # ax.set_xlim(QX_RANGE)
-    # ax.set_ylim(QY_RANGE)
+
     ax.grid(True, alpha=0.30)
     ax.legend(loc="lower left", framealpha=0.88)
 
-    # # ========================================================
-    # # 右图：沿理论线方向的一维分布比较
-    # # ========================================================
-    # ax = axs[1]
-    #
-    # umin = np.exp(-0.5 * nsigma * nsigma)
-    #
-    # if len(qx_all) > 0:
-    #     t_act, perp_act = project_points_to_theory_line(
-    #         qx_all,
-    #         qy_all,
-    #         theory_dict
-    #     )
-    #
-    #     # 只保留理论上合理范围附近的点。
-    #     # 这里允许一点数值偏差。
-    #     mask = (t_act >= umin - 0.05) & (t_act <= 1.05)
-    #     t_use = t_act[mask]
-    #
-    #     print("=== 实际工作点投影到理论线方向 ===")
-    #     if len(t_use) > 0:
-    #         print(f"有效投影点数: {len(t_use)} / {len(t_act)}")
-    #         print(f"t min / mean / max = {t_use.min():.8f}, {t_use.mean():.8f}, {t_use.max():.8f}")
-    #     else:
-    #         print("没有点落在设定的投影范围内。")
-    #
-    #     ax.hist(
-    #         t_use,
-    #         bins=90,
-    #         range=(umin, 1.0),
-    #         density=True,
-    #         alpha=0.50,
-    #         label="FFT particles projected"
-    #     )
-    #
-    # # 理论解析概率密度
-    # t_grid = np.linspace(umin, 0.9995, 800)
-    # pdf_grid = theory_u_pdf(t_grid, nsigma=nsigma)
-    #
-    # ax.plot(
-    #     t_grid,
-    #     pdf_grid,
-    #     color="red",
-    #     lw=3.0,
-    #     label="Analytical Gaussian"
-    # )
-    #
-    # ax.set_xlabel("u = lambda(s) / lambda_peak")
-    # ax.set_ylabel("Probability density")
-    # ax.set_title("Distribution along theory line")
-    # ax.set_xlim(umin, 1.0)
-    # ax.grid(True, alpha=0.30)
-    # ax.legend(framealpha=0.88)
     import os
     os.makedirs("./prabfig", exist_ok=True)
     plt.savefig("./prabfig/fig_tune_kv_.png", dpi=300, bbox_inches="tight")
-    plt.show()
-
-
-def plot_compare_only_2d(theory_dict, qx_all, qy_all):
-    """
-    如果你只想要一张二维图，可以调用这个函数。
-    """
-    Qx0, Qy0 = theory_dict["bare"]
-    Qx_max, Qy_max = theory_dict["gaussian_peak"]
-    dQx_max, dQy_max = theory_dict["dQ"]
-
-    qx_th, qy_th, s_th, u_th = compute_theory_kv_gaussian_distribution(
-        theory_dict,
-        n_macro=N_THEORY_MACRO,
-        seed=THEORY_SEED
-    )
-
-    fig, ax = plt.subplots(figsize=(8.0, 6.5), constrained_layout=True)
-
-    if len(qx_all) > 0:
-        h = ax.hist2d(
-            qx_all,
-            qy_all,
-            bins=[260, 260],
-            range=[QX_RANGE, QY_RANGE],
-            norm=LogNorm(),
-            cmap="viridis"
-        )
-        cbar = fig.colorbar(h[3], ax=ax)
-        cbar.set_label("FFT particle density")
-
-    ax.scatter(
-        qx_th,
-        qy_th,
-        s=5,
-        c="red",
-        alpha=0.08,
-        linewidths=0,
-        label="Analytical distribution",
-        zorder=6
-    )
-
-    umin = np.exp(-0.5 * nsigma * nsigma)
-    u_line = np.linspace(umin, 1.0, 500)
-
-    qx_line = Qx0 + dQx_max * u_line
-    qy_line = Qy0 + dQy_max * u_line
-
-    ax.plot(
-        qx_line,
-        qy_line,
-        "--",
-        color="red",
-        lw=3.0,
-        label="Analytical KV-Gaussian line",
-        zorder=8
-    )
-
-    ax.scatter(
-        Qx0,
-        Qy0,
-        marker="o",
-        s=260,
-        facecolor="white",
-        edgecolor="blue",
-        linewidth=2.8,
-        zorder=12,
-        label="Bare tune"
-    )
-
-    ax.scatter(
-        Qx_max,
-        Qy_max,
-        marker="*",
-        s=500,
-        color="red",
-        edgecolor="black",
-        linewidth=2.4,
-        zorder=13,
-        label="Max SC tune shift"
-    )
-
-    ax.set_xlabel("Qx")
-    ax.set_ylabel("Qz")
-    ax.set_title("Working-point footprint")
-    ax.set_xlim(QX_RANGE)
-    ax.set_ylim(QY_RANGE)
-    ax.grid(True, alpha=0.30)
-    ax.legend(loc="lower left", framealpha=0.88)
-
     plt.show()
 
 
@@ -781,6 +630,8 @@ if __name__ == "__main__":
     qx_all, qy_all = compute_fft_tunes()
     qx_all[qx_all>3.5] -= 1.0
     qy_all+=1.0
+    print(f"Qx FFT min / mean / max = {qx_all.min():.8f}, {qx_all.mean():.8f}, {qx_all.max():.8f}")
+    print(f"Qy FFT min / mean / max = {qy_all.min():.8f}, {qy_all.mean():.8f}, {qy_all.max():.8f}")
 
     # 推荐：二维 footprint + 一维投影分布
     plot_compare_with_theory_distribution(theory_dict, qx_all, qy_all)

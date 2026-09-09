@@ -856,7 +856,7 @@ def Bilinear_interp_2D_vect_uniform(X0, dX, NX,
         输出插值值（预先分配）
 
     out_flags : 1D ndarray, shape = (N,)
-        越界标志数组；1 表示该点超出网格范围
+        越界标志数组；1 表示该点超出网格范围，利用边界值进行外推插值
 
     返回：
     -------
@@ -895,6 +895,7 @@ def Bilinear_interp_2D_vect_uniform(X0, dX, NX,
     N = Xi.shape[0]
 
     for k in range(N):
+        out_flags[k] = 0
         x = Xi[k]
         y = Yi[k]
 
@@ -935,6 +936,168 @@ def Bilinear_interp_2D_vect_uniform(X0, dX, NX,
 
     return values[:N], out_flags[:N]
 
+
+@njit()
+def Bilinear_interp_2D_vect_uniform_2var(
+        X0, dX, NX,
+        Y0, dY, NY,
+        Z1, Z2,
+        Xi, Yi,
+        values1, values2,
+        out_flags):
+    """
+    等间距二维网格上的双变量同时双线性插值。
+    越界点允许轻微外推，out_flags=1 仅作标记。
+    """
+    N = Xi.shape[0]
+
+    for k in range(N):
+        out_flags[k] = 0
+
+        x = Xi[k]
+        y = Yi[k]
+
+        i = int(np.floor((x - X0) / dX))
+        j = int(np.floor((y - Y0) / dY))
+
+        if i < 0:
+            i = 0
+            out_flags[k] = 1
+        elif i >= NX - 1:
+            i = NX - 2
+            out_flags[k] = 1
+
+        if j < 0:
+            j = 0
+            out_flags[k] = 1
+        elif j >= NY - 1:
+            j = NY - 2
+            out_flags[k] = 1
+
+        xx0 = X0 + i * dX
+        yy0 = Y0 + j * dY
+
+        tx = (x - xx0) / dX
+        ty = (y - yy0) / dY
+
+        w00 = (1.0 - tx) * (1.0 - ty)
+        w01 = (1.0 - tx) * ty
+        w10 = tx * (1.0 - ty)
+        w11 = tx * ty
+
+        z00 = Z1[i,     j    ]
+        z01 = Z1[i,     j + 1]
+        z10 = Z1[i + 1, j    ]
+        z11 = Z1[i + 1, j + 1]
+        values1[k] = w00 * z00 + w01 * z01 + w10 * z10 + w11 * z11
+
+        z00 = Z2[i,     j    ]
+        z01 = Z2[i,     j + 1]
+        z10 = Z2[i + 1, j    ]
+        z11 = Z2[i + 1, j + 1]
+        values2[k] = w00 * z00 + w01 * z01 + w10 * z10 + w11 * z11
+
+    return values1[:N], values2[:N], out_flags[:N]
+
+
+@njit()
+def Bilinear_interp_2D_vect_uniform_3var(
+        X0, dX, NX,
+        Y0, dY, NY,
+        Z1, Z2, Z3,
+        Xi, Yi,
+        values1, values2, values3,
+        out_flags):
+    """
+    等间距二维网格上的三变量同时双线性插值。
+
+    参数
+    ----
+    X0, dX, NX :
+        x 方向网格起点、步长、点数
+    Y0, dY, NY :
+        y 方向网格起点、步长、点数
+
+    Z1, Z2, Z3 : 2D ndarray, shape = (NX, NY)
+        三张待插值的二维表，例如：
+            Z1 = SEO_r_matrix
+            Z2 = SEO_pr0_matrix
+            Z3 = SEO_s_matrix
+
+    Xi, Yi : 1D ndarray, shape = (N,)
+        插值点坐标
+
+    values1, values2, values3 : 1D ndarray, shape = (N,)
+        输出数组（预分配）
+
+    out_flags : 1D ndarray, shape = (N,)
+        越界标记：
+            0 -> 点在网格内
+            1 -> 点超出网格，利用边界值进行外推插值
+
+    返回
+    ----
+    values1, values2, values3, out_flags
+    """
+
+    N = Xi.shape[0]
+
+    for k in range(N):
+        out_flags[k] = 0
+
+        x = Xi[k]
+        y = Yi[k]
+
+        i = int(np.floor((x - X0) / dX))
+        j = int(np.floor((y - Y0) / dY))
+
+        if i < 0:
+            i = 0
+            out_flags[k] = 1
+        elif i >= NX - 1:
+            i = NX - 2
+            out_flags[k] = 1
+
+        if j < 0:
+            j = 0
+            out_flags[k] = 1
+        elif j >= NY - 1:
+            j = NY - 2
+            out_flags[k] = 1
+
+        xx0 = X0 + i * dX
+        yy0 = Y0 + j * dY
+
+        tx = (x - xx0) / dX
+        ty = (y - yy0) / dY
+
+        w00 = (1.0 - tx) * (1.0 - ty)
+        w01 = (1.0 - tx) * ty
+        w10 = tx * (1.0 - ty)
+        w11 = tx * ty
+
+        # -------- Z1 --------
+        z00 = Z1[i,     j    ]
+        z01 = Z1[i,     j + 1]
+        z10 = Z1[i + 1, j    ]
+        z11 = Z1[i + 1, j + 1]
+        values1[k] = w00 * z00 + w01 * z01 + w10 * z10 + w11 * z11
+
+        # -------- Z2 --------
+        z00 = Z2[i,     j    ]
+        z01 = Z2[i,     j + 1]
+        z10 = Z2[i + 1, j    ]
+        z11 = Z2[i + 1, j + 1]
+        values2[k] = w00 * z00 + w01 * z01 + w10 * z10 + w11 * z11
+
+        # -------- Z3 --------
+        z00 = Z3[i,     j    ]
+        z01 = Z3[i,     j + 1]
+        z10 = Z3[i + 1, j    ]
+        z11 = Z3[i + 1, j + 1]
+        values3[k] = w00 * z00 + w01 * z01 + w10 * z10 + w11 * z11
+
+    return values1[:N], values2[:N], values3[:N], out_flags[:N]
 
 @njit()
 def Bilinear_interp_2D_vect_uniform_3fields(

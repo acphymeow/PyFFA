@@ -989,9 +989,12 @@ def emap_kernel(r, fi,
                 box_y_min, box_y_max,
                 Er, Efi, Ez, Malloc_RF_shift, gap_index):
     """
-    同上，对每个粒子判定是否落在凸多边形内
-    若在内 → 计算 Δθ 并写 Er/Efi
-    若不在 → Er/Efi 置 0
+    对每个粒子判定是否落在当前 gap 的凸多边形内：
+    若在内 → 计算 Δθ 并写 Er/Efi，Malloc_RF_shift 记为 gap_index
+    若不在 → 不写任何数组（由调用方负责预先清零）。
+             注意：多 gap 叠加调用时，绝不能在未命中时清零，
+             否则会把前一个 gap 写入的场抹掉（2026-08-07 修复的
+             电压减半 bug 就是这个原因）。
     """
     Nv = poly_x.shape[0]
     Np = r.shape[0]
@@ -1005,9 +1008,6 @@ def emap_kernel(r, fi,
         # -------- 包围盒快速排斥 ----------
         if (x < box_x_min or x > box_x_max or
             y < box_y_min or y > box_y_max):
-            Er[k]  = 0.0
-            Efi[k] = 0.0
-            Ez[k] = 0.0
             continue
 
         # -------- 凸多边形同侧法 ----------
@@ -1030,11 +1030,6 @@ def emap_kernel(r, fi,
             Efi[k]   = acc_Etot * np.sin(dtheta)
             Ez[k] = 0.0
             Malloc_RF_shift[k] = gap_index
-        else:
-            Er[k]  = 0.0
-            Efi[k] = 0.0
-            Ez[k] = 0.0
-            Malloc_RF_shift[k] = 0
 
 # @njit(parallel=True)
 # def emap_kernel(r, fi,

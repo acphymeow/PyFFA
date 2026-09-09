@@ -10,8 +10,8 @@ config_data = {}
 # some general parameters
 config = dict()
 config['date'] = time.time()
-config['folder'] = '../Bmaps/Bmap_FD16'
-config['expand_order'] = 2
+config['folder'] = './Bmaps/Bmap_FD16_k7p63_B1p65_R465_F0_s49p97'
+config['expand_order'] = 0
 
 ###############################################################
 # machine parameters
@@ -27,14 +27,15 @@ Bmap['NSector'] = 16
 
 Bmap['theta_step_rad'] = np.deg2rad(0.005)  # unit: rad, 方位角步长
 Bmap['rmin_max_step_m'] = (10.8, 12.2, 0.001)  # unit: m， 比实际Bmap范围大一些，避免迭代过程中超出Bmap范围
-#alpha = 0.4478
 Bmap['interval_1'] = (5.625/22.5, 5.9083/22.5, 2.38755/22.5, 2.95415/22.5, 5.625/22.5)
+# Bmap['positive_or_negative_1'] = (0, 1.0, 0, -0.465074, 0)  # unit: 1
 Bmap['positive_or_negative_1'] = (0, 1.0, 0, -0.465074, 0)  # unit: 1
 Bmap['fringe_width_1'] = (0, 1.17, 0, 1.17, 0)  # unit: 1
 Bmap['SpiralAngle_deg'] = 49.973388
 
 Bmap['orbital_freq_MHz'] = 4.5  # unit: MHz, Type为等时'ISOCHRONOUS'时起效
 Bmap['k_value'] = 7.630003
+# Bmap['k_value'] = 7.230003
 Bmap['B0_max_T'] = 1.65  # unit: T, 参考半径处的B0, Type为等比'SCALE'时起效
 Bmap['R0_m'] = 12.0   # unit: m, 参考半径, Type为等比'SCALE'时起效
 
