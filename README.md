@@ -1,568 +1,384 @@
-# FFAG程序使用手册
+# PyFFA
 
-## 目录
+PyFFA is a Python research code for fixed-field alternating-gradient (FFAG) accelerator simulation. It provides analytical and tabulated magnetic-field models, closed-orbit and optics calculations, RF acceleration, multiparticle tracking, painting injection, and three-dimensional or slice-by-slice space-charge solvers.
 
-- [1. 引言](#1-引言)
-- [2. 命令行](#2-命令行)
-- [3. config文件说明](#3-config文件说明)
-  - [3.1 config_Bmap.py磁场配置文件](#31-config_bmappy磁场配置文件)
-  - [3.2 config_SEO.py闭轨计算配置](#32-config_seopy闭轨计算配置)
-  - [3.3 config_Emap.py电场配置](#33-config_Emappy电场配置)
-  - [3.4 多粒子跟踪](#34-多粒子跟踪)
-- [4. 输出文件格式与绘图说明](#4-输出文件格式与绘图说明)
+## Contents
 
-## 1. 引言
+- [Features](#features)
+- [Repository layout](#repository-layout)
+- [Requirements](#requirements)
+- [Environment setup](#environment-setup)
+- [Quick start](#quick-start)
+- [Magnetic-field and closed-orbit workflows](#magnetic-field-and-closed-orbit-workflows)
+- [RF electric-field workflow](#rf-electric-field-workflow)
+- [Multiparticle tracking](#multiparticle-tracking)
+- [Outputs](#outputs)
+- [Research projects](#research-projects)
+- [Benchmarks and reproducibility](#benchmarks-and-reproducibility)
+- [Validation](#validation)
+- [Data and repository policy](#data-and-repository-policy)
 
-### 1.1 简介
+## Features
 
-本程序用于模拟粒子在加速器电磁场map中和空间电荷效应下的三维运动轨迹，主要功能有：
-- 以中平面磁场 map 文件作为输入，利用静磁场无源无旋+泰勒展开，将中平面磁场外推形成3维磁场。
-- RF电场加速, 包括直线和螺旋形gap, 以及变腔压,变相位,变频率的纵向RF曲线
-- 运动求解器有两种可以选择：
-  - 4阶 Runge-Kutta 方法：单步4阶精度，不保辛；
-  - Boris 方法：单步2阶精度，保辛。
-- 使用FFT/ iFFT 加速的 PIC 算法进行2.5维空间电荷效应计算, 针对等比FFAG长弧形束团+非固定闭轨进行优化。
-- 涂抹注入。
+- Analytical scaling or isochronous FFAG fields generated from a mid-plane model and extended in three dimensions with high-order Taylor maps.
+- Direct interpolation of single-cell three-dimensional OPERA field tables.
+- Static equilibrium orbit (SEO), tune, and Twiss-function calculations.
+- Fixed or spiral RF gaps, multiple gaps per turn, and programmable voltage, phase, and frequency curves.
+- Fourth-order Runge-Kutta and second-order symplectic Boris tracking.
+- Three-dimensional Cartesian PIC/FFT and 2.5D slice-by-slice PIC/FFT space-charge models.
+- Painting injection, apertures, field harmonics, local extraction kickers, and configurable diagnostics.
+- Dedicated reverse-injection and kicker/septum study packages.
+- Public benchmark and paper-reproduction source code without large simulation datasets.
 
-### 1.2 依赖库
-
-- Python >= 3.12
-- OpenMP
-- MPI
-- NumPy (Python包)
-- SciPy (Python包)
-- Numba (Python包)
-- mpi4py (Python包)
-- matplotlib (Python包)
-- pyfftw (Python包)
-
-### 1.3 源代码
-
--CSNS HPC
-
--Github
-
-
-### 1.4 更新记录
--2025.04.14
-- initial submit。
-- 完成基本模拟功能: 束流光学，多粒子跟踪，3维空间电荷效应，涂抹注入。
-
--2025.06.05
-- 增加2.5维空间电荷效应。
-- 性能优化：为函数内所有临时数组变量提前预分配和复用内存，提升计算性能。
-- 性能优化：scipy.fft替换成fftw。
-- 并行方法优化：纯MPI多进程换成MPI多进程+numba.prange多线程混合模式，节点内用prange多线程，不复制内存；节点之间用MPI多线程通信，每个节点复制一次内存。
-
--2026.03 增加磁场误差模块、spiral gap、多gap、可变的腔压相位频率、磁场多极量分解、修复空间电荷效应投影方向问题、空间电荷相应计算结果校核
-
-
----
-
-
-## 2. 命令行
-
-项目采用与 GitHub 仓库主体一致的分层结构；下面列出随仓库发布的主体目录：
+## Repository layout
 
 ```text
 PyFFA/
-├── src/          # FFAG 核心模块
-├── examples/     # main_*.py 与 config_*.py
-├── benchmarks/   # 基准与验证脚本；reproducibility/scripts/ 保存可公开复现源码
-├── tools/        # 通用辅助分析和绘图脚本
-├── project_reverse_injection/  # 轨迹反推项目：脚本、文档和项目结果
-├── project_bump/               # bump/kicker 引出项目脚本和文档
-├── Bmaps/        # 本地磁场数据（由用户准备，不随仓库上传）
-└── Emaps/        # 本地电场数据（由用户生成，不随仓库上传）
+├── src/                         # Core FFAG modules
+├── examples/                    # main_*.py entry points and config_*.py templates
+├── benchmarks/                  # Numerical benchmarks and validation scripts
+│   └── reproducibility/scripts/ # Public reproducibility source tree
+├── tools/                       # General analysis, conversion, and plotting tools
+├── project_reverse_injection/   # Reverse-injection studies and documentation
+├── project_bump/                # Kicker, bump, and septum studies
+├── PaintCurvesNew/              # Generated painting-curve examples
+├── SetEnvCmd.ps1                # Windows PowerShell environment helper
+└── SetEnvCmd.sh                 # Linux/HPC environment helper
 ```
 
-请从**项目根目录**运行命令。`SetEnvCmd.ps1` 或 `SetEnvCmd.sh` 会把 `src/` 和可被工具复用的 `examples/` 临时加入当前终端的 `PYTHONPATH`；配置中的 `./Bmaps`、`./Emaps` 和 `./output` 等相对路径仍以项目根目录为基准。`examples/config_*.py` 生成的 `config_*.json` 也会保存在当前工作目录。
+Magnetic maps, electric maps, HPC working copies, generated JSON files, simulation outputs, and local research archives are intentionally excluded from Git. Typical local data directories are `Bmaps/`, `Emaps/`, and `output/`.
 
-所有命令行如下：
+All production commands should be launched from the repository root. Relative paths such as `./Bmaps`, `./Emaps`, and `./output` are resolved from the current working directory.
 
-```bash
-source ./SetEnvCmd.sh              # Linux/HPC；必须使用 source
+## Requirements
 
-python examples/config_Bmap.py             # 生成磁场配置
-python examples/main_Bmap.py -j config_Bmap.json     # 生成磁场 map
+- Python 3.12 or newer
+- OpenMP
+- MPI implementation
+- NumPy
+- SciPy
+- Numba
+- mpi4py
+- Matplotlib
+- pyFFTW
 
-python examples/config_SEO.py              # 设置闭轨计算参数，例如使用哪个磁场，计算哪些能量点
-(mpirun -np 6) python examples/main_SEO.py -j config_SEO.json   # 计算闭轨, 可使用 mpirun 进行并行运行, 也可直接运行
+Some plotting and presentation utilities have additional optional dependencies. Individual scripts report missing optional packages when required.
 
-python examples/config_Emap.py             # 生成电场配置
-python examples/main_Emap.py -j config_Emap.json     # 生成电场 map
+## Environment setup
 
-# 个人电脑测试时：
-python examples/config_track.py            # 生成跟踪配置，包括初始小束团，涂抹,SC,电磁场map
-python examples/main_track.py -j config_track.json   # 多粒子跟踪
-python examples/main_MergeData.py output/simulation1/Bunch_Position/  # 计算完以后，合并多线程输出文件
+The environment helpers add `src/` and `examples/` to `PYTHONPATH` for the current shell only. This keeps the source tree importable without installing PyFFA as a package and allows tools to reuse helpers such as `main_track.load_bmap_auto`.
 
-# CSNS HPC上运行（提交脚本按具体集群环境另行准备）：
-python examples/config_track.py            # 生成跟踪配置，包括初始小束团，涂抹,SC,电磁场map
-
-# -r选项可以进行断点续传：
-python .\examples\main_track.py -j .\config_track.json -r .\time_2596.84_rank_0.npz
-python .\examples\main_track.py -j .\config_track.json -r .\time_2596.84_rank_0.csv
-# 其中.\time_2596.84_rank_0.npz或.\time_2596.84_rank_0.csv为t=2596.84ns断点时刻的Bunch文件
-```
-
-Windows PowerShell 使用：
+Windows PowerShell:
 
 ```powershell
+Set-Location C:\path\to\PyFFA
 .\SetEnvCmd.ps1
-python .\examples\config_track.py
-python .\examples\main_track.py -j .\config_track.json
 ```
 
-
-## 3. config文件说明
-
-### 3.1 config_Bmap.py磁场配置文件
-
-磁场map文件参数在config_Bmap.py文件中定义，需要包含以下字典变量。
-
-machine为机器参数，包含注入引出能量两个参数，单位MeV。
-```python
-# machine parameters
-machine = dict()
-machine['energy_inj'] = 300
-machine['energy_ext'] = 600
-```
-
-Bmap包含所有lattice参数，包括lattice类型，排列，场强等：
-```python
-# Bmap configuration
-Bmap = dict()
-Bmap['Type'] = 'SCALE'
-# 可选：等时'ISOCHRONOUS', or 等比'SCALE'
-Bmap['NSector'] = 12
-
-Bmap['theta_step_rad'] = np.deg2rad(0.005)  # unit: rad
-Bmap['rmin_max_step_m'] = (8.0, 9.3, 0.001)  # unit: m， 比实际Bmap范围大一些，避免迭代过程中超出Bmap范围
-
-Bmap['interval_1'] = (7.5/30.0, 9.375/30.0, 2.8125/30.0, 2.8125/30.0, 7.5/30.0)  # unit: 1
-Bmap['positive_or_negative_1'] = (0, 1.0, 0, -1.201/1.65, 0)  # unit: 1
-Bmap['fringe_width_1'] = (0, 0.20, 0, 0.35, 0)  # unit: 1
-Bmap['SpiralAngle_deg'] = 40.0  # unit: deg
-
-Bmap['orbital_freq_MHz'] = 4.5  # unit: MHz, Type为等时'ISOCHRONOUS'时起效
-Bmap['k_value'] = 5.714  # unit: 1, Type为等比'SCALE'时起效
-Bmap['B0_max_T'] = 1.65  # unit: T, 参考半径处的B0, Type为等比'SCALE'时起效
-Bmap['R0_m'] = 9.0   # unit: m, 参考半径, Type为等比'SCALE'时起效
-```
-
-| 参数名                  | 含义与说明                                                                                     |
-|-----------------------|-------------------------------------------------------------------------------------------|
-| **Type**              | 定义磁场 map 类型，可选等时 `ISOCHRONOUS` 或等比 `SCALE`                                                |
-| **NSector**           | Lattice 的周期数，表示磁场的周期数。本例为 12 个周期                                                          |
-| **theta_step_rad**    | map柱坐标网格的方位角步长，单位为 rad。本例为 0.005°（已转换为 rad）                                               |
-| **rmin_max_step_m**   | map柱坐标网格半径范围与步长，单位为 m。本例从 8.0 m 到 9.3 m，步长 0.001 m                                        |
-| **interval_1**        | 一个周期划分为若干段，各段角宽度占比，本例分为5段，第1段占cell角宽度的7.5/30，第2段占cell角宽度的9.375/30                         |
-| **positive_or_negative_1** | 每段的磁极极性：`1` 表示正磁极，`0` 为漂移段，负数为负磁极，负数数值代表相对强度，本例依次为漂移段，正磁极，漂移段，负磁极（场强为正磁极的1.201/1.65倍），漂移段 |
-| **fringe_width_1**    | 边缘场宽度相对磁极平顶段的比例，如 `0.5` 表示 50% , 可以根据绘制的Bz-theta图微调，保证磁极间的场分布不相互干涉                        |
-| **SpiralAngle_deg**   | 磁极的螺旋角，单位为度                                                                               |
-| **orbital_freq_MHz**  | 仅等时型磁场生效，目标回旋频率，例如 4.5 MHz                                                                |
-| **k_value**           | 仅等比型磁场生效，k 值，公式中的k                                                                        |
-| **B0_max_T**          | 仅等比型磁场生效，参考半径处的磁场强度，公式中的B_0                                                               |
-| **R0_m**              | 仅等比型磁场生效，参考半径值，公式中的r_0                                                                    |
-
-对于 **等比型磁场**，磁场随半径的分布为：
-
-$$
-B(r) = B_0 \left(\frac{r}{r_0}\right)^k
-$$
-
-其中，$B_0$ 是参考半径 $r_0$ 处的磁场强度，$k$ 是梯度值。
-
-对于 **等时型磁场**，磁场为关于 $r$ 的多项式形式：
-
-$$
-B(r) = a_0 + a_1 (r - r_{\text{min}}) + a_2 (r - r_{\text{min}})^2 + a_3 (r - r_{\text{min}})^3 + \cdots
-$$
-
-其中，$r_{\text{min}}$ 是起始半径，$a_0, a_1, a_2, \dots$ 是多项式的系数，用户指定目标频率，程序将自动搜索出一组满足要求的系数，使得回旋频率处处相等。
-
-
-### 3.2 config_SEO.py闭轨计算配置
-
-进行多粒子模拟前，还需要计算闭轨和光学参数，因为注入和跟踪过程中需要读取一些闭轨参数作为参考。
-
-闭轨配置文件中包含以下参数
-```python
-# some general parameters
-config = dict()
-config['start_Ek'] = 300.0
-config['end_Ek'] = 600.0
-config['delta_Ek'] = 30.0
-config['extra_Ek'] = ()
-config['Bmap_path'] = './Bmap'
-# 也可以指向 OPERA 3D 场文件夹，例如 './Bmaps/OperaFieldMap'。
-# 若目录下没有 config_Bmap.json，程序会自动按唯一 .json/.npz 数据集加载 3D 场。
-```
-
-| 参数名                  | 含义与说明                                                       |
-|-----------------------|-------------------------------------------------------------|
-| **start_Ek**              | 起始能量点，单位MeV，本例为300MeV                                       |
-| **end_Ek**           | 终止能量点，单位MeV，本例为600MeV                                       |
-| **delta_Ek**    | 能量点间隔，单位MeV，本例为30MeV                                        |
-| **extra_Ek**   | 是否有额外能量点，本例没有，可以加额外能量点，例如config['extra_Ek'] = (310,320,350,) |
-| **Bmap_path**              | 使用的磁场目录；解析场目录包含 `config_Bmap.json`，OPERA 3D 目录包含唯一匹配的 `.json/.npz` 数据集 |
-
-闭轨数据计算结果会保存在**Bmap_path目录下resultsSEO文件夹中**
-
-### 3.3 config_Emap.py电场配置
-
-### 3.4 多粒子跟踪配置
-多粒子跟踪的参数在config_track.py中定义, 包括注入的小束团信息，磁场map和闭轨信息，电场信息，涂抹曲线，空间电荷配置等，包含以下内容：
-
-```python
-# 跟踪参数
-track = dict()
-stop_condition = {'max_stepsN': 50000000,  # 最多跟踪多少step
-                  'max_turn': 1000.5, #  最多跟踪多少圈
-                  'max_time': float('inf')}  #  最多跟踪多少时间(second)
-
-track['start_EkMeV'] = 300.0  # 初始动能 (MeV)
-track['stop_condition'] = stop_condition  # 3个终止条件满足任一个即终止
-track['time_step'] = 0.02e-9  #采用固定步长, 0.02ns --> 回旋周期约273ns --> 每圈约13650步, 每个cell约1137步
-track['start_azimuth'] = 0.0  # 注入点方位角
-track['solver_type'] = 1  # 0--->RK4, 单步4阶精度但不保辛; 1--->Boris, 单步2阶精度但保辛, 速度稍快
-```
-
-| 参数名                  | 含义与说明                               |
-|-----------------------|-------------------------------------|
-| **start_EkMeV**              | 注入粒子的动能，单位MeV，本例为300MeV。            |
-| **stop_condition**           | 模拟终止条件，包括最多step数，最多圈数，最多时间3个条件，满足1个即终止。 |
-| **time_step**    | 时间步长，单位s                            |
-| **start_azimuth**   | 注入点方位角，即在哪里注入                       |
-| **solver_type**              | 常微分方程求解器类型，0为4阶龙格库塔方法，1为Boris推进方法   |
-
-
-然后是空间电荷效应配置参数
-```python
-# SC参数
-SC = dict()
-SC['enable_SC'] = True  # True False 是否加空间电荷效应
-SC['SC_type'] = 1
-# SC_type=0: 直角坐标系网格+FFT(3维, 适用于小束团)
-# SC_type=1: 柱坐标系网格+FFT(2.5维, 适用于长束团)
-SC['grid_size_rfz'] = [256, 256, 128]  # 网格尺寸, 直角坐标系为x y z, 柱坐标系为r z phi
-```
-
-| 参数名                  | 含义与说明                                                          |
-|-----------------------|----------------------------------------------------------------|
-| **enable_SC**              | 是否加空间电荷效应。                                                     |
-| **SC_type**           | 空间电荷求解方法，0为直角坐标系网格+FFT(3维, 适用于小束团)， 1为柱坐标系网格+FFT(2.5维, 适用于长束团) |
-| **grid_size_rfz**    | 各个方向的网格划分个数, 顺序为直角坐标系为x y z, 柱坐标系r phi z                       |
-
-然后是磁场配置参数
-```python
-# 磁场和高阶非线性项配置
-BmapAndSEO = dict()
-BmapAndSEO['maps'] = './Bmap'  # 磁场路径
-BmapAndSEO['max_order'] = 1  # 展开阶数, n代表展开到(2*n+1阶) [0-->最高1阶, 1-->最高3阶, 2-->最高5阶]
-```
-
-| 参数名                  | 含义与说明                                       |
-|-----------------------|---------------------------------------------|
-| **maps**              | 使用的磁场map的路径                                 |
-| **max_order**           | 展开阶数，n代表最高展开到(2*n+1阶)， 因为Bz只有偶数阶，Br和Bf只有奇数阶 |
-
-然后是电场配置参数
-```python
-# 电场配置
-Emap = dict()
-Emap['enable'] = True    # True False
-Emap['maps'] = './Emap/FrequencyCurve.txt'  # 电场频率曲线(文件表头包含了电压，加速相位，加速腔位置等参数)
-```
-
-| 参数名                  | 含义与说明                |
-|-----------------------|----------------------|
-| **maps**              | 使用的电场map的路径，电场使用理论模型 |
-| **enable**           | 是否加电场                |
-
-然后是小束团配置参数
-```python
-# 注入小束团参数
-BunchPara = dict()
-BunchPara['ParticleDensity'] = 1.0e4  # 每个宏粒子对应的实际粒子数
-BunchPara['ParticleNum'] = 100  # 每个子束团的宏粒子数
-BunchPara['TransverseREmit'] = 0.1  # 横向发射度 (pi*mm*mrad)
-BunchPara['TransverseZEmit'] = 0.1  # 横向发射度 (pi*mm*mrad)
-BunchPara['LongitudeT'] = 0.3  # 纵向长度 (ns)
-BunchPara['LongitudeDEk'] = 0.004  # 纵向能散 (MeV)
-BunchPara['InjTimeNanoSec'] = 0  # 初始注入时刻 (ns)
-BunchPara['TransverseDistType'] = 'gauss'  # 横向分布类型 (可选类型'gauss', 'kv', 'waterbag', 'hollow_waterbag')
-BunchPara['LongitudeDistType'] = 'gauss'  # 纵向分布类型 (可选类型'gauss', 'kv', 'waterbag', 'hollow_waterbag')
-```
-
-| 参数名                  | 含义与说明                                                                     |
-|-----------------------|---------------------------------------------------------------------------|
-| **ParticleNum**              | 每个小束团的宏粒子数                                                                |
-| **ParticleDensity**           | 每个宏粒子对应的实际粒子数                                                             |
-| **TransverseREmit**    | 小束团的R方向（径向r-r'）发射度，单位π*mm*mrad，1倍RMS发射度                                   |
-| **TransverseZEmit**   | 小束团的Z方向（轴向z-z'）发射度，单位π*mm*mrad，1倍RMS发射度                                   |
-| **LongitudeT**              | 小束团纵向（t-Ek）时间长度，单位ns                                                      |
-| **LongitudeDEk**              | 小束团纵向（t-Ek）能散，单位MeV                                                       |
-| **InjTimeNanoSec**           | 注入第1个小束团的时刻，一般默认为0                                                        |
-| **TransverseDistType**   | 小束团r-r',z-z'相空间分布类型，可选择'gauss', 'kv', 'waterbag', 'hollow_waterbag'4种     |
-| **LongitudeDistType**              | 小束团t-Ek相空间分布类型，可选择'match', 'gauss', 'kv', 'waterbag', 'hollow_waterbag'5种 |
-
-然后是涂抹过程配置参数
-```python
-# 涂抹配置
-Paint = dict()
-Paint['enable'] = True    # True False
-Paint['MaxBunchNum'] = 100  # 注入子束团个数
-Paint['TimeInterval'] = 273.35  # 时间间隔ns
-Paint['Curve'] = './PaintCurves/Curve4.paint' # 涂抹曲线包含5列，第一列为时间，后面为小束团在相空间的偏移量
-```
-
-| 参数名                  | 含义与说明                                 |
-|-----------------------|---------------------------------------|
-| **enable**              | 是否涂抹                                  |
-| **MaxBunchNum**           | 最多注入多少小束团                             |
-| **TimeInterval**              | 每隔多少时间注入一个小束团                         |
-| **Curve**           | 涂抹曲线包含5列，第一列为时间，后面为小束团在r-r'和z-z'相空间的偏移 |
-
-
-然后是dump探测器配置参数，首先创建一个探测器对象，然后加入到DumpPara['modules']的探测器列表中，可以加多个探测器对象用来输出多组信息。
-```python
-# Dump 配置(探测器)
-DumpPara = dict()
-
-# 创建一个探测器对象:
-PositionDumpBunch = {
-    "type": "PositionDumpBunch",  # 粒子经过特定位置时保存整个束团, 保存每个位置的bunch为一个单独文件
-    # 采用一次写入的方式  速度较快
-    "start_time": 273.35e-9 * (-1.0),
-    "end_time": 273.35e-9 * 10.0,
-    "dump_azimuth": [5.6, 35.6, 65.6, 95.6],  # 保存间隔的方位角 (度)
-    "save_folder": "./output/simulation1/Bunch_Position"  # 保存路径
-}
-# 将所有探测器加入到探测器列表中
-DumpPara['modules'] = [PositionDumpBunch, ]
-```
-
-以下是PositionDumpBunch的参数说明
-
-| 参数名                  | 含义与说明                                                      |
-|-----------------------|------------------------------------------------------------|
-| **type**              | 探测器类型，本例为PositionDumpBunch，表示探测器放在给定方位角处，输出穿过给定方位角的Bunch信息 |
-| **start_time**           | 探测器起始时间                                                    |
-| **end_time**              | 探测器结束时间                                                    |
-| **dump_azimuth**           | 探测器放置在哪些方位角                                                |
-| **save_folder**           | 输出文件到哪个目录                                                  |
-
-
-根据在跟踪过程中保存粒子信息，有4种探测器类型：
-
-| Dump 类型               | 文件输出方式      | 触发条件         | 适用场景                    |
-|-----------------------|-----------|--------------|-------------------------|
-| **PositionDumpBunch** | 每个束团一个文件  | 穿过给定方位角时记录一次   | 记录给定位置的束团信息（类似于PyORBIT） |
-| **PositionDump**      | 每个粒子一个文件  | 穿过给定方位角时记录一次   | 记录粒子在特定位置运动演变           |
-| **StepDumpBunch**          | 每个束团一个文件 | 每隔一定时间间隔记录一次 | 记录束团的时间演变，其输出文件也用于断点续传  |
-| **StepDump**                  | 每个粒子一个文件 | 每隔一定时间间隔记录一次   | 记录粒子轨迹(文件很大非常耗时)        |
-
-除了PositionDumpBunch以外，其他3种示例如下
-```python
-# 其他几种Dump探测器
-# StepDump:
-StepDump = {
-    "type": "StepDump",  # 按时间间隔保存粒子 每个粒子单独保存为一个文件 按ID区分 可用于绘制单粒子轨迹
-    # 采用追加写入的方式 且频繁读写 速度很慢 数据量大占用空间 仅能短时间使用
-    "start_time": 273.35e-9 * (-1.0), # 开始时间
-    "end_time": 273.35e-9 * 60.0, # 终止时间
-    "interval_time": 50.0e-9,  # 间隔多少时间保存一次
-    "num_particles_to_dump_global": 50,  # 全局保存的粒子数
-    "save_folder": "./output/simulation1/Particle_time"  # 保存路径
-}
-
-# StepDumpBunch:
-StepDumpBunch = {
-    "type": "StepDumpBunch",  # 按时间间隔保存整个束团 按步数保存bunch为一个单独文件 按步数区分
-    # 采用一次写入的方式 速度较快
-    "start_time": 273.35e-9 * (-1.0), # 开始时间
-    "end_time": 273.35e-9 * 60.0, # 终止时间
-    "interval_time": 273.35e-9*10.5, # 每隔多少时间保存一次当前bunch
-    "save_folder": "./output/simulation1/Bunch_time"  # 保存路径
-}
-
-# PositionDump:
-PositionDump = {
-    "type": "PositionDump",  # 粒子经过特定位置时保存, 每个粒子存为一个单独文件
-    # 采用追加写入的方式  读写不如StepDump频繁  速度较慢
-    "start_time": 273.35e-9 * (-1.0),
-    "end_time": 273.35e-9 * 600.0,
-    "dump_azimuth": (np.array([5.61, 35.61, 65.61, ])).tolist(),  # 保存间隔的方位角 (度)
-    "num_particles_to_dump_global": 100,  # 全局保存的粒子数
-    "save_folder": "./output/simulation1/Particle_Position"  # 保存路径
-}
-```
-
-
-## 4. 输出文件格式与绘图说明
-
-在模拟过程中，程序会输出磁场、电场、中间数据以及多个探测器模块记录的粒子信息，以下按模块进行说明。
-
-### 4.1 磁场与电场文件格式
-
-磁场与电场 map 通常保存在 `./Bmaps/` 和 `./Emaps/` 目录下，对应的配置文件分别为根目录中的 `config_Bmap.json` 和 `config_Emap.json`。磁场为三维扩展 map，电场为基于频率曲线的理想模型（在给定位置生成一个矩形区域，矩形区域内加均匀电场）。
-
-* 磁场 map：
-
-  * 文件格式为 `.npz`，包含柱坐标网格下的 `Bz`, `Br`, `Bf`的展开系数
-
-* 电场 map：
-
-  * 格式为 `.txt`，表头包含频率、电压、加速相位、加速区域（矩形）位置，数据部分为频率曲线
-
----
-
-
-### 4.2 闭轨与 Twiss 函数输出文件格式
-
-程序在搜索SEO（静态平衡轨道，不同能量的闭轨） 与 Twiss 函数计算流程时，会在指定 Bmap 目录下生成 `resultsSEO/` 文件夹，包含如下分析数据文件。当前保存的 `SEO_r.txt`、`SEO_pr.txt` 与 Twiss/Beta 曲线均为一整圈 `0..2π` 数据；严格 cell 周期场下，闭轨搜索可先按一个 cell 求解再展开保存。
-
-| 文件名                        | 内容                               |
-| -------------------------- |----------------------------------|
-| `SEO_ini.txt`              | 不同能量闭轨的特征参数（Qr, Qz, freq, MeanR） |
-| `SEO_r.txt`                | 不同能量闭轨的 r(φ)                     |
-| `SEO_pr.txt`               | 不同能量闭轨的 pr(φ)                    |
-| `BetaFuncR.txt`            | 径向 β<sub>r</sub>(φ) 曲线           |
-| `BetaFuncZ.txt`            | 轴向 β<sub>z</sub>(φ) 曲线           |
-| `AlphaFuncR.txt`           | 径向 α<sub>r</sub>(φ) 曲线           |
-| `AlphaFuncZ.txt`           | 轴向 α<sub>z</sub>(φ) 曲线           |
-| `Bz.txt`、`Br.txt`、`Bf.txt` | 闭轨上的磁场分量                         |
-
-文件格式说明：
-
-* 所有数据均为 ASCII 文本格式，表头注明单位（如 Ek 单位为 MeV，角度单位为 deg）
-* 第一列为 能量(Ek)，第一行为 方位角(rad)，数据区域为不同能量点、不同方位角对应的物理量
-
-下面给出绘制闭轨的示例方法，其他twiss参数文件格式类似：
-```python
-import numpy as np
-import matplotlib.pyplot as plt
-
-# 读取 r(φ) 数据, 绘制闭轨
-data = np.loadtxt('./Bmap/resultsSEO/SEO_r.txt')
-
-# 第0行是 phi，单位 rad；后续每行是对应能量点的 r(phi)
-phi_rad = data[0, 1:]
-phi_deg = np.rad2deg(phi_rad)
-r_matrix = data[1:, 1:]  # shape: [n_energy, n_phi]
-ek_list = data[1:, 0]    # 第1列是Ek（单位MeV）
-
-# r vs fi
-plt.figure(figsize=(8, 6))
-for i, ek in enumerate(ek_list):
-    plt.plot(phi_deg, r_matrix[i], label=f"Ek = {ek:.1f} MeV")
-plt.xlabel('φ (deg)')
-plt.ylabel('r (m)')
-plt.title("Closed Orbit r(φ)")
-plt.legend()
-plt.grid(True)
-
-# r*cos(fi) vs r*sin(fi)
-plt.figure(figsize=(6, 6))
-for i, ek in enumerate(ek_list):
-    x = r_matrix[i] * np.cos(phi_rad)
-    y = r_matrix[i] * np.sin(phi_rad)
-    plt.plot(x, y, label=f"Ek = {ek:.1f} MeV")
-plt.xlabel('x (m)')
-plt.ylabel('y (m)')
-plt.title("Closed Orbits in x-y Plane")
-plt.legend()
-plt.axis('equal')
-plt.grid(True)
-
-plt.tight_layout()
-plt.show()
-```
----
-
-### 4.3 探测器输出数据格式
-
-不同探测器的输出文件格式完全一致，均为 `.npz` 格式的二进制数据，结构为 `n×17` 的二维数组，其中每行代表一个粒子状态，但**触发机制和数据堆叠方式不同**：
-
-* `StepDump` / `StepDumpBunch`：按时间间隔触发，同一时间所有粒子堆叠或同一粒子按时间步堆叠
-* `PositionDump` / `PositionDumpBunch`：按方位角触发，穿越探测角时记录粒子。其中PositionDumpBunch是类似于PyORBIT,在一个位置输出束团信息。
-
-与 PyORBIT 的在线合并+打印不同，本程序采用 FLUKA 类似的方式：
-
-* 每个进程独立输出本地 `.npz` 文件
-* 后处理时统一合并为可读的ASCII文件`.csv` 文件
-
-输出 `.npz` 或`.csv` 文件内容结构如下：
-
-| 索引 | 变量名         | 单位  | 含义                       |
-| -- | ----------- | --- |--------------------------|
-| 0  | `r`         | m   | 径向位置                     |
-| 1  | `pr`        | rad | 径向动量斜率 = arctan(vr / vf) |
-| 2  | `z`         | m   | 轴向位置                     |
-| 3  | `pz`        | rad | 轴向动量斜率 = arctan(vz / vf) |
-| 4  | `fi`        | rad | 方位角                      |
-| 5  | `Ek`        | MeV | 动能                       |
-| 6  | `inj_t`     | s   | 注入时刻                     |
-| 7  | `Inj_flag`  | -   | 是否已注入（1: 是, 0: 否）        |
-| 8  | `Survive`   | -   | 是否存活（1: 是, 0: 丢失）        |
-| 9  | `RF_phase`  | rad | 当前时刻电场的RF 相位（sin）        |
-| 10 | `Esc_r`     | V/m | 空间电荷场 Er                 |
-| 11 | `Esc_z`     | V/m | 空间电荷场 Ez                 |
-| 12 | `Esc_fi`    | V/m | 空间电荷场 Efi                |
-| 13 | `Bunch_ID`  | -   | 小束团编号                    |
-| 14 | `Local_ID`  | -   | 当前MPI进程内编号               |
-| 15 | `Global_ID` | -   | 全局编号                     |
-| 16 | `t`         | s   | 当前记录时刻                   |
-
-#### 输出文件命名规则：
-
-```
-prefix_start_{start_time}_end_{end_time}_rank_{rank_id}.npz
-```
-
-例如：
-
-```
-crossing_angle_5.6_start_0_end_1000_rank_1.npz
-```
-
-表示该文件记录的是 rank 1 进程在 0 到 1000 ns 时间段内，穿过 5.6° 方位角的粒子数据。
-
-```
-crossing_angle_5.6_start_0_end_1000_rank_merged.csv
-```
-
-表示该文件记录的是在 0 到 1000 ns 时间段内，穿过 5.6° 方位角的粒子数据, 各进程合并为一个文件。
-
-输出文件示例：
-
-```
-output/simulation1/Bunch_Position/
-├── crossing_angle_5.6_start_0_end_1000_rank_0.npz
-├── crossing_angle_5.6_start_0_end_1000_rank_1.npz
-└── ...
-```
----
-
-## 5. 数据合并与可视化工具
-
-### 5.1 合并多线程 npz 文件为 CSV
-
-每个线程会单独输出一个 `.npz` 文件，若需整体可视化分析，可使用脚本 `examples/main_MergeData.py` 合并为 `.csv` 格式：
+Linux or HPC shell:
 
 ```bash
+cd /path/to/PyFFA
+source ./SetEnvCmd.sh
+```
+
+The shell script must be sourced; executing it in a child shell will not retain the updated `PYTHONPATH`.
+
+## Quick start
+
+The standard workflow is:
+
+```text
+config_Bmap.py -> config_Bmap.json -> main_Bmap.py
+                                      |
+config_SEO.py  -> config_SEO.json  -> main_SEO.py
+                                      |
+config_Emap.py -> config_Emap.json -> main_Emap.py
+                                      |
+config_track.py -> config_track.json -> main_track.py
+```
+
+From the repository root:
+
+```bash
+# 1. Generate an analytical magnetic-field configuration and map.
+python examples/config_Bmap.py
+python examples/main_Bmap.py -j config_Bmap.json
+
+# 2. Search closed orbits and calculate optical functions.
+python examples/config_SEO.py
+python examples/main_SEO.py -j config_SEO.json
+
+# MPI can be used for the SEO energy scan.
+mpirun -np 6 python examples/main_SEO.py -j config_SEO.json
+
+# 3. Generate the RF frequency curve and optional spiral-gap maps.
+python examples/config_Emap.py
+python examples/main_Emap.py -j config_Emap.json
+
+# 4. Generate the tracking configuration and run tracking.
+python examples/config_track.py
+python examples/main_track.py -j config_track.json
+
+# 5. Merge distributed detector output when required.
 python examples/main_MergeData.py output/simulation1/Bunch_Position/
 ```
 
-输出结果保存在原目录的 `merged_files/` 子文件夹中，命名规则如下：
+The checked-in configuration scripts are research templates, not universal zero-configuration examples. Before a production run, review their energy range, field-map paths, SEO result directory, RF curve, aperture, dump destinations, MPI settings, and particle count. A fresh clone does not contain the large field maps needed by the current FD16 examples.
 
+Checkpoint restart accepts either NPZ or CSV particle data:
+
+```bash
+python examples/main_track.py -j config_track.json -r time_2596.84_rank_0.npz
+python examples/main_track.py -j config_track.json -r time_2596.84_rank_0.csv
 ```
-crossing_angle_5.6_start_0_end_1000_merged.csv
+
+## Magnetic-field and closed-orbit workflows
+
+### Analytical fields
+
+`examples/config_Bmap.py` defines the machine energy range and the analytical lattice. Important entries include:
+
+| Key | Meaning |
+|---|---|
+| `config.folder` | Output directory for the generated magnetic map |
+| `config.expand_order` | Requested Taylor-map expansion order |
+| `machine.energy_inj`, `machine.energy_ext` | Injection and extraction kinetic energies in MeV |
+| `Bmap.Type` | `SCALE` or `ISOCHRONOUS` |
+| `Bmap.NSector` | Number of lattice sectors |
+| `Bmap.theta_step_rad` | Azimuthal grid step in radians |
+| `Bmap.rmin_max_step_m` | Radial range and step in metres |
+| `Bmap.interval_1` | Relative cell-element lengths |
+| `Bmap.positive_or_negative_1` | Relative element polarities and strengths |
+| `Bmap.fringe_width_1` | Fringe-field parameters |
+| `Bmap.SpiralAngle_deg` | Spiral angle in degrees |
+| `Bmap.k_value` | Scaling-field index |
+| `Bmap.B0_max_T`, `Bmap.R0_m` | Reference field and radius |
+
+For a scaling field,
+
+$$
+B(r) = B_0 \left(\frac{r}{r_0}\right)^k.
+$$
+
+For an isochronous field, the radial field is represented by a polynomial whose coefficients are determined from the requested orbital-frequency behaviour.
+
+### OPERA 3D fields
+
+`examples/main_SEO.py` and `examples/main_track.py` automatically distinguish the two supported map layouts:
+
+- A directory containing `config_Bmap.json` is loaded as an analytical/Taylor map.
+- Otherwise, a directory containing one matching OPERA metadata JSON and NPZ dataset is loaded as an OPERA 3D map.
+
+OPERA queries use the global azimuth. The field class folds it into the real single-cell table using the table's `phi_min` and `phi_max` metadata. Analytical fields continue to use the cell-local azimuth.
+
+See [OPERA 3D field-data guide](OPERA_3D_FIELD_DATA_GUIDE_CN_GENERIC.md) for the current OPERA conversion and metadata notes.
+
+### SEO and Twiss calculations
+
+`examples/config_SEO.py` controls the energy scan and field-error harmonics:
+
+```python
+config['start_Ek'] = 300.0
+config['end_Ek'] = 600.0
+config['delta_Ek'] = 50.0
+config['extra_Ek'] = ()
+config['Bmap_path'] = './Bmaps/OperaFieldMap'
+config['SEO_folder'] = 'resultsSEO'
 ```
 
-CSV 文件包含所有粒子属性，列顺序与 npz文件 中定义一致，最后一列为记录时间。
+The Bmap path may point to either an analytical map directory or an OPERA 3D dataset directory. Results are written below `<Bmap_path>/<SEO_folder>/`.
 
----
-(20250605,未完)
+Typical SEO outputs are:
+
+| File | Content |
+|---|---|
+| `SEO_ini.txt` | Closed-orbit summary, including tunes, frequency, and mean radius |
+| `SEO_r.txt` | Closed-orbit radius as a function of azimuth |
+| `SEO_pr.txt` | Normalized radial momentum as a function of azimuth |
+| `BetaFuncR.txt`, `BetaFuncZ.txt` | Radial and vertical beta functions |
+| `AlphaFuncR.txt`, `AlphaFuncZ.txt` | Radial and vertical alpha functions |
+| `Bz.txt`, `Br.txt`, `Bf.txt` | Field components sampled on the closed orbit |
+
+The current implementation saves full-turn SEO and Twiss curves. Strictly cell-periodic fields may use a one-cell search before the orbit is expanded to a full turn. With enabled field harmonics, final closed-orbit refinement is performed over a full turn.
+
+## RF electric-field workflow
+
+`examples/config_Emap.py` can generate an RF frequency curve and an optional spiral-gap field map. It supports:
+
+- independent enable flags for the frequency curve and spiral map;
+- voltage and synchronous-phase ramps specified by turn number;
+- multiple RF gaps and harmonic number `h`;
+- fixed rectangular gaps or spiral gaps derived from SEO intersections;
+- Gaussian transverse gap profiles;
+- automatic per-gap phase offsets;
+- separate calculation and saved radial ranges.
+
+The primary configuration groups are:
+
+| Key | Meaning |
+|---|---|
+| `config.filename` | Frequency-curve output path |
+| `Emap.Bmap_fold` | Magnetic-map directory containing SEO data |
+| `Emap.acc_phase_start/end` | Synchronous phase program |
+| `Emap.acc_voltage_start/end` | Voltage program |
+| `Emap.phase_ramp_start/end` | Phase-ramp turn interval |
+| `Emap.voltage_ramp_start/end` | Voltage-ramp turn interval |
+| `Emap.harmonic` | RF harmonic number |
+| `Emap.Ngap` | Number of accelerating gaps |
+| `Emap.gap_model` | `fixed` or `spiral` |
+| `Emap.emap_save_dir` | Spiral-map output directory |
+
+For multiple gaps, the code applies a common synchronous-phase program and an automatically generated fixed offset
+
+$$
+\Delta\phi_i = \frac{2\pi h i}{N_{\mathrm{gap}}},
+\qquad i=0,\ldots,N_{\mathrm{gap}}-1.
+$$
+
+The tracker dispatches the RF model from the map header: `fixed` uses `FFAG_EField_new`, while `spiral` uses `FFAG_EField_spiral`.
+
+## Multiparticle tracking
+
+`examples/config_track.py` writes `config_track.json`. The main configuration blocks are:
+
+| Block | Purpose |
+|---|---|
+| `config` | MPI process count and Numba thread count |
+| `track` | Initial energy, start time, time step, solver, and stop conditions |
+| `SC` | Space-charge switch, solver type, grid size, and update interval |
+| `BmapAndSEO` | Magnetic-map path, SEO directory, and Taylor order |
+| `BumpKicker` | Optional global-azimuth local kicker fields |
+| `Emap` | RF map path and enable switch |
+| `BunchPara` | Macroparticle count, intensity, emittance, and distributions |
+| `Paint` | Painting curve and injection timing |
+| `Aperture` | Radial and vertical acceptance limits |
+| `DumpPara` | Position- or time-triggered diagnostics |
+
+### Tracking solvers
+
+- `solver_type = 0`: fourth-order Runge-Kutta, fourth-order single-step accuracy, not symplectic.
+- `solver_type = 1`: Boris pusher, second-order single-step accuracy and symplectic.
+
+The simulation stops when any configured limit in `max_stepsN`, `max_turn`, or `max_time` is reached. Tracking starts from `track.time_start`.
+
+### Space charge
+
+- `SC_type = 0`: three-dimensional Cartesian PIC/FFT, intended for compact bunches.
+- `SC_type = 1`: 2.5D slice-by-slice PIC/FFT with energy-dependent closed-orbit projection, intended for long curved bunches.
+- `SC_type = 2`: Gaussian toy model used for controlled comparisons.
+
+For `SC_type = 1`, the production chain uses `Build_2_5D_SliceGrid_sbs_new_fixProjection`. It computes transverse and longitudinal space-charge components and writes them to particle columns 10, 11, and 12 as `Esc_r`, `Esc_z`, and `Esc_fi`. The FFTW plan is reused, while the Green-function kernel is rebuilt for the current transverse grid spacing at each space-charge update.
+
+`SC.step` controls how many tracking steps elapse between field recomputations. The field is frozen during an individual RK4 or Boris step.
+
+### Kicker model
+
+`BumpKicker` defines optional hard-edge, static local fields in global azimuth. The default vertical component is
+
+$$
+B_z = \mathrm{sign}\,\frac{BL}{L_{\mathrm{eff}}}.
+$$
+
+The region is limited by `phi_start_deg`, `phi_span_deg`, `rmin_m`, and `rmax_m`. Constant `Br_T` and `Bfi_T` components may also be supplied. The current model has no time waveform and no vertical cutoff.
+
+### Dump modules
+
+Four detector types are available:
+
+| Type | Trigger | File organisation | Typical use |
+|---|---|---|---|
+| `PositionDumpBunch` | Crossing selected azimuths | One file per bunch snapshot | Bunch diagnostics at fixed locations |
+| `PositionDump` | Crossing selected azimuths | One file per particle | Turn-by-turn particle motion |
+| `StepDumpBunch` | Fixed time interval | One file per bunch snapshot | Bunch evolution and restart data |
+| `StepDump` | Fixed time interval | One file per particle | Short single-particle trajectory studies |
+
+Each MPI rank writes its own NPZ files. Use `examples/main_MergeData.py` or `examples/main_MergeDataBatch.py` to create merged CSV files for analysis.
+
+## Outputs
+
+Particle dump arrays use 17 columns:
+
+| Index | Name | Unit | Description |
+|---:|---|---|---|
+| 0 | `r` | m | Radial position |
+| 1 | `pr` | rad | Radial trajectory angle or normalized radial slope |
+| 2 | `z` | m | Vertical position |
+| 3 | `pz` | rad | Vertical trajectory angle or slope |
+| 4 | `fi` | rad | Global azimuth |
+| 5 | `Ek` | MeV | Kinetic energy |
+| 6 | `inj_t` | s | Injection time |
+| 7 | `Inj_flag` | - | Injection-state flag |
+| 8 | `Survive` | - | Survival flag |
+| 9 | `RF_phase` | rad | RF phase using the sine convention |
+| 10 | `Esc_r` | V/m | Radial space-charge field |
+| 11 | `Esc_z` | V/m | Vertical space-charge field |
+| 12 | `Esc_fi` | V/m | Azimuthal space-charge field |
+| 13 | `Bunch_ID` | - | Injected sub-bunch identifier |
+| 14 | `Local_ID` | - | Rank-local particle identifier |
+| 15 | `Global_ID` | - | Global particle identifier |
+| 16 | `t` | s | Recording time |
+
+Detector filenames encode the trigger position or interval, time bounds, and MPI rank. Merged CSV output is saved in a `merged_files/` subdirectory by the merge utilities.
+
+## Research projects
+
+### Reverse injection
+
+[`project_reverse_injection/`](project_reverse_injection/) contains the 300 MeV stripping-injection reverse-tracking tools, analytical-field parameter scans, OPERA 3D reverse tracking, and dynamic-aperture studies. Start with:
+
+- [Reverse-injection guide](project_reverse_injection/README.md)
+- [Dynamic-aperture guide](project_reverse_injection/DA_README.md)
+
+These scripts expect local Bmap and result datasets and should be run from the repository root.
+
+### Kicker, bump, and septum studies
+
+[`project_bump/`](project_bump/) contains production-Boris single-particle and bunch tracking for extraction kickers, septum placement, kicker-split comparisons, and two- or three-straight layouts. Start with the [bump-project guide](project_bump/README.md).
+
+The current scripts include the four-kicker `2+2`, `1+3`, `3+1`, and `0+4` scans; the three-straight `2+1+1`, `1+2+1`, and `1+1+2` scans; and the six-kicker `2+2+2` comparison. Generated scan directories are intentionally excluded from Git.
+
+## Benchmarks and reproducibility
+
+General numerical benchmarks are stored in [`benchmarks/`](benchmarks/). The self-contained public source snapshot for longitudinal-space-charge and related paper checks is located at [`benchmarks/reproducibility/scripts/`](benchmarks/reproducibility/scripts/).
+
+The reproducibility tree contains Python and Markdown source only. Generated PNG, PDF, CSV, NPZ, JSON, and text results are excluded. Several 3D comparisons require local HPC output and SEO tables that are not part of the repository; the individual README files identify those inputs.
+
+Example offline validation:
+
+```bash
+python benchmarks/reproducibility/scripts/02_harmonic_continuity/test_core_bin_enclosing_arc.py --no-show
+```
+
+## Validation
+
+After changing core tracking or space-charge code, run at least:
+
+```bash
+python -m compileall -q src examples benchmarks tools project_reverse_injection/scripts project_bump/scripts
+python -c "import FFAG_Bunch, FFAG_SC_new, FFAG_track; print('imports ok')"
+python examples/main_track.py --help
+```
+
+The environment helper must be active for the import and entry-point checks.
+
+Useful targeted checks include:
+
+```bash
+python tools/tool_smoke_sc_fixProjection.py
+python tools/tool_check_emap_voltage.py
+python tools/tool_test_Opera3D_field.py --field-dir Bmaps/OperaFieldMap
+python project_bump/scripts/tool_compare_kicker_three_straights.py --help
+```
+
+The targeted field and tracking checks require their corresponding local datasets.
+
+## Data and repository policy
+
+- Do not commit generated configuration JSON, magnetic/electric maps, HPC copies, caches, or simulation output.
+- Keep production modules in `src/`, executable workflows in `examples/`, reusable utilities in `tools/`, and project-specific scripts below their `project_*` directory.
+- Run workflows from the repository root unless a script explicitly documents another working directory.
+- Avoid force-pushing or rewriting published history.
+- Preserve the particle space-charge interface: columns 10, 11, and 12 are `Esc_r`, `Esc_z`, and `Esc_fi`.
+
+PyFFA is active research software. Numerical settings and example configurations should be reviewed for each lattice, beam, and computing environment before results are used in an accelerator design study.
