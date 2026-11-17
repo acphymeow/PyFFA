@@ -19,9 +19,6 @@ config['build_spiral_map'] = True
 config['plot_frequency_curve'] = True
 config['plot_spiral_map'] = True
 
-# 频率曲线输出文件
-config['filename'] = './Emaps/FrequencyCurve_LSC.txt'
-
 ###############################################################
 # ------------------- Machine parameters ---------------------
 ###############################################################
@@ -146,10 +143,11 @@ Emap['spiral_newton_iter'] = 10         # 最近点搜索的 Newton 迭代次数
 Emap['spiral_normal_side'] = 1          # 法向方向：+1 左法向，-1 右法向
 
 # ============================================================
-# spiral map 生成参数
+# Emap 输出：频率曲线及三个 spiral 场图分量放在同一目录
 # ============================================================
-# 输出目录与文件名
-Emap['emap_save_dir'] = './Emaps'
+EMAP_DIR = './Emaps'
+config['filename'] = os.path.join(EMAP_DIR, 'FrequencyCurve_LSC.txt')
+Emap['emap_save_dir'] = EMAP_DIR
 Emap['Er_map_file'] = 'Er_coef.txt'
 Emap['Ez_map_file'] = 'Ez_coef.txt'
 Emap['Ephi_map_file'] = 'Ephi_coef.txt'
