@@ -446,20 +446,14 @@ def deriv_phi(F, dphi):
 # SEO 目录解析
 # ============================================================
 def resolve_seo_dir(Emap):
-    """
-    返回含 SEO_ini.txt 的目录。
-    优先把 Bmap_fold 本身当 SEO 目录；否则拼上 Emap['SEO_folder']（默认 resultsSEO）。
-    """
-    base = str(Emap['Bmap_fold'])
-    seo_folder = str(Emap.get('SEO_folder', 'resultsSEO'))
-    candidates = [base, os.path.join(base, seo_folder)]
-    for d in candidates:
-        if os.path.isfile(os.path.join(d, 'SEO_ini.txt')):
-            return d
-    raise FileNotFoundError(
-        "找不到 SEO_ini.txt，已尝试: " + "; ".join(candidates)
-        + "。请检查 Emap['Bmap_fold']/Emap['SEO_folder']，或先运行 main_SEO.py 生成闭轨数据。"
-    )
+    """SEO 目录 = Bmap_fold/SEO_folder；缺配置键或缺 SEO_ini.txt 都直接报错。"""
+    seo_dir = os.path.join(Emap['Bmap_fold'], Emap['SEO_folder'])
+    if not os.path.isfile(os.path.join(seo_dir, 'SEO_ini.txt')):
+        raise FileNotFoundError(
+            f"{seo_dir} 缺少 SEO_ini.txt：请检查 Emap['Bmap_fold']/Emap['SEO_folder']，"
+            "或先运行 main_SEO.py 生成闭轨数据。"
+        )
+    return seo_dir
 
 
 # ============================================================

@@ -35,7 +35,7 @@ machine['energy_ext'] = 600   # MeV
 Emap = dict()
 
 Emap['Bmap_fold'] = "./Bmaps/Bmap_test"       # 磁场文件目录（相对项目根目录）
-Emap['SEO_folder'] = 'resultsSEO'             # Bmap_fold 下的 SEO 结果子目录；若 Bmap_fold 本身即 SEO 目录则忽略
+Emap['SEO_folder'] = 'resultsSEO'             # Bmap_fold 下的 SEO 结果子目录（必填，无默认值）
 # Emap['Bmap_fold'] = "/hpcfs/APG/zhoukai/ffa/Bmap"
 
 # ============================================================
