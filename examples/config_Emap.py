@@ -34,7 +34,8 @@ machine['energy_ext'] = 600   # MeV
 ###############################################################
 Emap = dict()
 
-Emap['Bmap_fold'] = "../Bmaps/Bmap_FD16"       # 磁场文件目录
+Emap['Bmap_fold'] = "./Bmaps/Bmap_test"       # 磁场文件目录（相对项目根目录）
+Emap['SEO_folder'] = 'resultsSEO'             # Bmap_fold 下的 SEO 结果子目录；若 Bmap_fold 本身即 SEO 目录则忽略
 # Emap['Bmap_fold'] = "/hpcfs/APG/zhoukai/ffa/Bmap"
 
 # ============================================================
@@ -117,7 +118,7 @@ Emap['rmax'] = 12.5                     # fixed 模型下电场有效最大半�
 #   spiral_Nphi      : 在频率曲线求交时使用的 phi 扫描点数
 Emap['spiral_alpha_deg'] = 0.00
 Emap['spiral_r_ref'] = 8.5
-Emap['spiral_s_ref_deg'] = 20.0
+Emap['spiral_s_ref_deg'] = 30.0
 Emap['spiral_Nphi'] = 4000
 
 # 高斯型 gap 场参数

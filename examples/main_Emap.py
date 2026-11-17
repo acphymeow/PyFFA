@@ -443,6 +443,26 @@ def deriv_phi(F, dphi):
 
 
 # ============================================================
+# SEO 目录解析
+# ============================================================
+def resolve_seo_dir(Emap):
+    """
+    返回含 SEO_ini.txt 的目录。
+    优先把 Bmap_fold 本身当 SEO 目录；否则拼上 Emap['SEO_folder']（默认 resultsSEO）。
+    """
+    base = str(Emap['Bmap_fold'])
+    seo_folder = str(Emap.get('SEO_folder', 'resultsSEO'))
+    candidates = [base, os.path.join(base, seo_folder)]
+    for d in candidates:
+        if os.path.isfile(os.path.join(d, 'SEO_ini.txt')):
+            return d
+    raise FileNotFoundError(
+        "找不到 SEO_ini.txt，已尝试: " + "; ".join(candidates)
+        + "。请检查 Emap['Bmap_fold']/Emap['SEO_folder']，或先运行 main_SEO.py 生成闭轨数据。"
+    )
+
+
+# ============================================================
 # 频率曲线生成
 # ============================================================
 def build_frequency_curve_from_config(config, Emap, machine):
@@ -533,8 +553,7 @@ def build_frequency_curve_from_config(config, Emap, machine):
     phi_gap_of_Ek = None
 
     if gap_model == "spiral":
-        Bmap_fold = Emap['Bmap_fold']
-        SEO_r_path = os.path.join(Bmap_fold, "resultsSEO_noError", "SEO_r.txt")
+        SEO_r_path = os.path.join(resolve_seo_dir(Emap), "SEO_r.txt")
 
         spiral_alpha_deg = float(Emap['spiral_alpha_deg'])
         spiral_r_ref = float(Emap['spiral_r_ref'])
@@ -559,12 +578,7 @@ def build_frequency_curve_from_config(config, Emap, machine):
     # --------------------------------------------------------
     # 回旋频率插值器：从 SEO 数据构造 f_rev(E)
     # --------------------------------------------------------
-    Bmap_fold = Emap['Bmap_fold']
-    SEO_ini_path = os.path.join(Bmap_fold, "resultsSEO_noError", "SEO_ini.txt")
-    if not os.path.exists(SEO_ini_path):
-        raise FileNotFoundError(
-            f"{Bmap_fold} 缺少 resultsSEO/SEO_ini.txt 文件：需要先计算闭轨信息以获取回旋频率"
-        )
+    SEO_ini_path = os.path.join(resolve_seo_dir(Emap), "SEO_ini.txt")
     SEO_ini_data = np.loadtxt(SEO_ini_path, skiprows=2)
 
     Ek_nodes_f = SEO_ini_data[:, 1].astype(np.float64)
