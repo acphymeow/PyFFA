@@ -106,7 +106,7 @@ Emap['rmax'] = 12.5                     # fixed 模型下电场有效最大半�
 # spiral gap 参数（频率曲线 + spiral map 共用）
 # ============================================================
 # spiral 模型：
-#     r(phi) = r_ref * exp((phi - s_ref)/tan(alpha))
+#     phi(r) = s_ref + tan(alpha)*log(r/r_ref). For alpha = 0, the azimuth is constant.
 #
 # 说明：
 #   spiral_alpha_deg : spiral 角 alpha（度）
@@ -115,7 +115,7 @@ Emap['rmax'] = 12.5                     # fixed 模型下电场有效最大半�
 #   spiral_Nphi      : 在频率曲线求交时使用的 phi 扫描点数
 Emap['spiral_alpha_deg'] = 0.00
 Emap['spiral_r_ref'] = 8.5
-Emap['spiral_s_ref_deg'] = 30.0
+Emap['spiral_s_ref_deg'] = 25.0
 Emap['spiral_Nphi'] = 4000
 
 # 高斯型 gap 场参数
@@ -152,6 +152,27 @@ Emap['Er_map_file'] = 'Er_coef.txt'
 Emap['Ez_map_file'] = 'Ez_coef.txt'
 Emap['Ephi_map_file'] = 'Ephi_coef.txt'
 
+# ============================================================
+# Separate second-harmonic cavity with a zero-angle spiral field map and twice the main RF frequency
+# ============================================================
+SecondHarmonic = dict()
+SecondHarmonic['enable'] = False
+SecondHarmonic['n_cells_after_main'] = 1     # Number of lattice cells downstream of the first main RF gap
+SecondHarmonic['spiral_FWHM'] = 0.20        # Gaussian field FWHM normal to the gap [m]
+SecondHarmonic['voltage_V'] = 50e3          # Nominal peak voltage of this cavity [V]
+SecondHarmonic['phase_at_sync_deg'] = 180.0  # Target phase at the cavity center for the synchronous particle [deg]
+#
+# Bmap_test has 16 cells. For n = 1, the azimuthal separation is 360/16 = 22.5 deg.
+# With the first main RF gap at 25 deg, the second-harmonic cavity sits at 25 + 22.5 = 47.5 deg.
+# At fixed energy with h = 1, the main RF phase advances by 22.5 deg between the two cavities.
+# The second-harmonic phase advances by 45 deg. If the main synchronous phase is 0 deg and
+# the target phase is 180 deg, the required offset is 180 - 45 = 135 deg.
+# At the cavity center, sin(45 deg + 135 deg) = 0 with a negative slope.
+# This implementation uses a fixed-energy reference. To enable it, set acc_phase_start and
+# acc_phase_end to 0 deg and generate both the frequency curve and the spiral field maps.
+# A target phase of 0 or 180 deg gives zero field at the cavity center for the synchronous particle.
+# Shifting the target phase away from a zero crossing gives the particle a net energy change.
+
 # 多加速间隙相位说明：
 # 1. 当前程序采用“公共同步相位程序 + 各 gap 自动相位偏移”的形式：
 #        φ_eff(i, k) = φ_sync(k) + Δφ_i
@@ -186,6 +207,7 @@ Emap['num_turns'] = 9000                # 最大圈数，覆盖实际模拟圈�
 config_data['config'] = config
 config_data['machine'] = machine
 config_data['Emap'] = Emap
+config_data['SecondHarmonic'] = SecondHarmonic
 
 ###############################################################
 # ------------------- Write JSON file -------------------------

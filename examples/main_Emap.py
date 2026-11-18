@@ -459,7 +459,7 @@ def resolve_seo_dir(Emap):
 # ============================================================
 # 频率曲线生成
 # ============================================================
-def build_frequency_curve_from_config(config, Emap, machine):
+def build_frequency_curve_from_config(config, Emap, machine, second_harmonic_header=()):
     save_path = config['filename']
 
     energy_inj = float(machine['energy_inj'])
@@ -792,6 +792,7 @@ def build_frequency_curve_from_config(config, Emap, machine):
         f"Er_map_file = {Emap['Er_map_file']}",
         f"Ez_map_file = {Emap['Ez_map_file']}",
         f"Ephi_map_file = {Emap['Ephi_map_file']}",
+        *second_harmonic_header,
         "#Time (s)        Frequency (Hz)    V0 (V)    Energy (MeV)",
     ]
 
@@ -1149,6 +1150,50 @@ def vis_multi_gap_field(freq_curve_path, z_vis=1.0e-3, v0_volt=1.0, nphi_vis=720
     return fig
 
 
+def build_second_harmonic_map(config, Emap, SecondHarmonic):
+    """Build a spiral field map using the main RF gap and lattice cell spacing."""
+    bmap_config_path = os.path.join(Emap['Bmap_fold'], 'config_Bmap.json')
+    with open(bmap_config_path, encoding='utf-8') as f:
+        nsectors = json.load(f)['Bmap']['NSector']
+
+    n = SecondHarmonic['n_cells_after_main']
+    if type(n) is not int:
+        raise TypeError("SecondHarmonic['n_cells_after_main'] must be an integer.")
+    if not 1 <= n < nsectors:
+        raise ValueError(f"SecondHarmonic['n_cells_after_main'] must be from 1 to {nsectors - 1}.")
+
+    # An integer number of main-gap spacings places the cavity at a main RF gap.
+    if n * Emap['Ngap'] % nsectors == 0:
+        raise ValueError(f"n_cells_after_main={n} places the second-harmonic cavity at a main RF gap.")
+
+    delta_phi_deg = n * 360.0 / nsectors
+    phi2_deg = (Emap['spiral_s_ref_deg'] + delta_phi_deg) % 360.0
+    phase_advance_deg = Emap['harmonic'] * delta_phi_deg
+    phase2_offset_deg = (SecondHarmonic['phase_at_sync_deg'] - 2.0 * phase_advance_deg) % 360.0
+
+    map_folder = 'second_harmonic'
+    emap2 = Emap.copy()
+    emap2['spiral_alpha_deg'] = 0.0
+    emap2['spiral_s_ref_deg'] = phi2_deg
+    emap2['spiral_FWHM'] = SecondHarmonic['spiral_FWHM']
+    emap2['spiral_U'] = 1.0  # Normalize the gap integral to one and apply the cavity voltage during tracking.
+    emap2['emap_save_dir'] = os.path.join(os.path.dirname(config['filename']), map_folder)
+    if emap2['spiral_FWHM'] <= 0:
+        raise ValueError("SecondHarmonic['spiral_FWHM'] must be greater than zero.")
+    build_spiral_map_from_config(config, emap2)
+    print(f"[Second harmonic] phi={phi2_deg:g} deg, phase offset={phase2_offset_deg:g} deg")
+
+    return [
+        f"second_harmonic_n_cells = {n}",
+        f"second_harmonic_phi_deg = {phi2_deg}",
+        f"second_harmonic_phase_offset_deg = {phase2_offset_deg}",
+        f"second_harmonic_voltage_V = {SecondHarmonic['voltage_V']}",
+        f"second_harmonic_Er_map_file = {map_folder}/{emap2['Er_map_file']}",
+        f"second_harmonic_Ez_map_file = {map_folder}/{emap2['Ez_map_file']}",
+        f"second_harmonic_Ephi_map_file = {map_folder}/{emap2['Ephi_map_file']}",
+    ]
+
+
 # ============================================================
 # 主程序
 # ============================================================
@@ -1161,6 +1206,7 @@ def main():
     config = config_data['config']
     Emap = config_data['Emap']
     machine = config_data['machine']
+    SecondHarmonic = config_data['SecondHarmonic']
 
     do_freq = bool(config['build_frequency_curve'])
     do_map = bool(config['build_spiral_map'])
@@ -1169,8 +1215,18 @@ def main():
     if gap_model not in ("fixed", "spiral"):
         raise ValueError("Emap['gap_model'] must be 'fixed' or 'spiral'.")
 
+    second_harmonic_header = ()
+    if SecondHarmonic['enable']:
+        if gap_model != 'spiral' or Emap['spiral_alpha_deg'] != 0.0:
+            raise ValueError("Fixed-energy dual-harmonic RF requires a zero-angle spiral field map for the main RF.")
+        if Emap['acc_phase_start'] != 0.0 or Emap['acc_phase_end'] != 0.0:
+            raise ValueError("Dual-harmonic RF uses a fixed-energy reference. Set acc_phase_start and acc_phase_end to 0.")
+        if not (do_freq and do_map):
+            raise ValueError("Enabling the second-harmonic cavity requires both build_frequency_curve and build_spiral_map.")
+        second_harmonic_header = build_second_harmonic_map(config, Emap, SecondHarmonic)
+
     if do_freq:
-        build_frequency_curve_from_config(config, Emap, machine)
+        build_frequency_curve_from_config(config, Emap, machine, second_harmonic_header)
 
     if do_map and gap_model == "spiral":
         build_spiral_map_from_config(config, Emap)

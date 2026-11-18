@@ -26,6 +26,40 @@ from FFAG_SC import Bunch_SC_Calculator, Bunch_SC_Calculator_FlatCoordinate
 import pyfftw
 
 
+try:
+    profile
+except NameError:
+    def profile(func):
+        return func
+
+
+def evaluate_rf_field(Emap, t, r, fi, z, rf_phase, Er, Ez, Efi, gap_index):
+    """Fill the RF field buffers and return the main frequency and a phase modulation flag."""
+    frequency, voltage = Emap.Interpolation1D_freq_curve(t)
+    Emap.Interpolation2D_EMap(r, fi, z, Er, Ez, Efi, gap_index, v0_volt=voltage)
+    if Emap.second_harmonic is None:
+        return frequency, False
+
+    # Modulate the main RF field with each gap's phase offset.
+    in_main_gap = gap_index >= 0
+    sin_main = np.zeros_like(rf_phase)
+    sin_main[in_main_gap] = np.sin(rf_phase[in_main_gap] + Emap.rf_shift[gap_index[in_main_gap]])
+
+    # The second-harmonic cavity uses its own field map and shares the main RF clock.
+    Er2 = np.empty_like(Er)
+    Ez2 = np.empty_like(Ez)
+    Efi2 = np.empty_like(Efi)
+    gap_index2 = np.empty_like(gap_index)
+    Emap.second_harmonic.Interpolation2D_EMap(
+        r, fi, z, Er2, Ez2, Efi2, gap_index2, v0_volt=Emap.second_harmonic_voltage
+    )
+    sin_second = np.sin(2.0 * rf_phase + Emap.second_harmonic_phase_offset)
+    Er[:] = Er * sin_main + Er2 * sin_second
+    Ez[:] = Ez * sin_main + Ez2 * sin_second
+    Efi[:] = Efi * sin_main + Efi2 * sin_second
+    return frequency, True
+
+
 class FFAG_RungeKutta:
     def __init__(self):
         self.running = True
@@ -1020,8 +1054,9 @@ class FFAG_RungeKutta:
             )
 
         # 电场分量
-        dRF_phase, v0_volt = Emap.Interpolation1D_freq_curve(t)
-        Emap.Interpolation2D_EMap(r, fi, z, E_r, E_z, E_fi, Malloc_RF_shift, v0_volt=v0_volt)
+        dRF_phase, fields_are_modulated = evaluate_rf_field(
+            Emap, t, r, fi, z, RF_Phase, E_r, E_z, E_fi, Malloc_RF_shift
+        )
         dRF_phase = dRF_phase * np.pi * 2 * dt
 
 
@@ -1034,7 +1069,7 @@ class FFAG_RungeKutta:
                                  Malloc_Ex_cart, Malloc_Ey_cart, Malloc_Ez_cart,
                                  Malloc_Bx_cart, Malloc_By_cart, Malloc_Bz_cart,
                                  Malloc_RF_shift, Emap.rf_shift,
-                                 apply_RF=Emap.EnableFlag)
+                                 apply_RF=Emap.EnableFlag, fields_are_modulated=fields_are_modulated)
 
         # 5) 使用 Boris 推进更新 (x_cart, v_cart)
         x_new, y_new, z_new, vx_new, vy_new, vz_new = self.Boris_push_cartesian_new(
@@ -1616,6 +1651,7 @@ def FunctionForSEOVect(t, x, GlobalParameters):
     return FunctionForSEOUnified(t, x, GlobalParameters)
 
 
+@profile
 def FunctionForSEOUnified(t, x, GlobalParameters, return_bfield=False):
     """
     Unified SEO right-hand side for single-particle and vectorized tracking.
@@ -1747,10 +1783,10 @@ def FunctionForAccelerationBunch_dt(t, mat_in,
         )
 
     # 电场分量
-    dRF_phase, v0_volt = Emap.Interpolation1D_freq_curve(t)
+    dRF_phase, fields_are_modulated = evaluate_rf_field(
+        Emap, t, r, fi, z, RF_Phase, E_r, E_z, E_fi, malloc_RFGap_index
+    )
     dRF_phase = dRF_phase * np.pi * 2
-    # print(t * 1e9, dRF_phase*365*1e-9, np.rad2deg(RF_Phase[0]))
-    Emap.Interpolation2D_EMap(r, fi, z, E_r, E_z, E_fi, malloc_RFGap_index, v0_volt=v0_volt)
 
     RK4_equations_of_motion_njit(
         r, z, fi,
@@ -1761,7 +1797,7 @@ def FunctionForAccelerationBunch_dt(t, mat_in,
         q, c, E0_J,
         dxdt, dRF_phase,
         Emap.rf_shift, malloc_RFGap_index,
-        apply_RF=Emap.EnableFlag)
+        apply_RF=Emap.EnableFlag, fields_are_modulated=fields_are_modulated)
 
     return dxdt, Bz0, Br, Bfi
 

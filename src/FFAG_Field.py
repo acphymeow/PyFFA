@@ -169,6 +169,7 @@ class FFAG_EField_new:
 
         header, data = self.ParseEmapFile(freq_curve_path)
         self.GapType = "fixed"
+        self.second_harmonic = None
         # self.acc_voltage = header["V0"]
         self.acc_phi0 = np.deg2rad(header["acc_phi_paint"])
         # print(type(header["gap_azimuth"]))
@@ -381,26 +382,14 @@ class FFAG_EField_new:
         return params, data
 
 
-class FFAG_EField_spiral:
-    def __init__(self, freq_curve_path, EnableFlag):
-        header, data = self.ParseEmapFile(freq_curve_path)
-        self.GapType = "spiral"
-        self.acc_phi0 = np.deg2rad(float(header["acc_phi_paint"]))
-        self.gap_azimuths = np.deg2rad(np.atleast_1d(header["gap_azimuth"]).astype(np.float64))
-        self.gap_width = float(header["gap_width"])
-        self.freq_curve = data
-        self.harmonic = int(header["harmonic"])
+class FFAG_SpiralFieldMap:
+    """Spatial field map shared by the main RF gaps and the second-harmonic cavity."""
+    def __init__(self, er_path, ez_path, ephi_path, gap_azimuths, field_scale, EnableFlag):
+        self.gap_azimuths = gap_azimuths  # Rotations relative to the field map [rad].
         self.EnableFlag = EnableFlag
-        self.rf_shift = np.deg2rad(np.atleast_1d(header["rf_shift"]).astype(np.float64))
-
-        emap_dir = os.path.dirname(os.path.abspath(freq_curve_path))
-        er_file = header.get("Er_map_file", "Er_coef.txt")
-        ez_file = header.get("Ez_map_file", "Ez_coef.txt")
-        ephi_file = header.get("Ephi_map_file", "Ephi_coef.txt")
-
-        self.Er_map, self.r_axis, self.phi_axis = self.LoadSpiralMap(os.path.join(emap_dir, er_file))
-        self.Ezcoef_map, _, _ = self.LoadSpiralMap(os.path.join(emap_dir, ez_file))
-        self.Ephi_map, _, _ = self.LoadSpiralMap(os.path.join(emap_dir, ephi_file))
+        self.Er_map, self.r_axis, self.phi_axis = self.LoadSpiralMap(er_path)
+        self.Ezcoef_map, _, _ = self.LoadSpiralMap(ez_path)
+        self.Ephi_map, _, _ = self.LoadSpiralMap(ephi_path)
 
         self.r0 = self.r_axis[0]
         self.dr = self.r_axis[1] - self.r_axis[0]
@@ -415,49 +404,7 @@ class FFAG_EField_spiral:
         self.map_phimin = self.phi_axis[0]
         self.map_phimax = self.phi_axis[-1]
 
-        self.acc_Etot_uniform = 1.0 / self.gap_width
-
-        # --------------------------------------------------
-        # 读取 spiral gap 交点信息，并构造按能量的一维插值器
-        # --------------------------------------------------
-        self.Ek_gap = np.atleast_1d(header["Ek_gap"]).astype(np.float64)
-        self.r_gap = np.atleast_1d(header["r_gap"]).astype(np.float64)
-        self.phi_gap_deg = np.atleast_1d(header["phi_gap_deg"]).astype(np.float64)
-        self.phi_gap_unwrapped_deg = np.atleast_1d(header["phi_gap_unwrapped_deg"]).astype(np.float64)
-
-        # 转成弧度
-        self.phi_gap = np.deg2rad(self.phi_gap_deg)
-        self.phi_gap_unwrapped = np.deg2rad(self.phi_gap_unwrapped_deg)
-
-        # 若表头写入顺序异常，这里统一按能量升序排序
-        sort_idx = np.argsort(self.Ek_gap)
-        self.Ek_gap = self.Ek_gap[sort_idx]
-        self.r_gap = self.r_gap[sort_idx]
-        self.phi_gap = self.phi_gap[sort_idx]
-        self.phi_gap_unwrapped = self.phi_gap_unwrapped[sort_idx]
-
-        # 简单线性插值器
-        def _make_linear_interp(x_nodes, y_nodes):
-            x_nodes = np.asarray(x_nodes, dtype=np.float64)
-            y_nodes = np.asarray(y_nodes, dtype=np.float64)
-
-            def interp_func(x):
-                x = np.asarray(x, dtype=np.float64)
-                return np.interp(x, x_nodes, y_nodes)
-
-            return interp_func
-
-        self.r_gap_interp = _make_linear_interp(self.Ek_gap, self.r_gap)
-        self.phi_gap_interp_unwrapped = _make_linear_interp(self.Ek_gap, self.phi_gap_unwrapped)
-
-        if MPI.COMM_WORLD.Get_rank() == 0:
-            print(f"[Emap] load spiral Emap from {emap_dir}")
-            # print(f"[Emap] gap azimuths (deg) = {np.rad2deg(self.gap_azimuths)}")
-            # print(f"[Emap] rf_shift (deg)     = {np.rad2deg(self.rf_shift)}")
-            # print(
-            #     f"[Emap] source phi range (deg) = "
-            #     f"[{np.rad2deg(self.map_phimin):.6f}, {np.rad2deg(self.map_phimax):.6f}]"
-            # )
+        self.acc_Etot_uniform = field_scale
 
     def LoadSpiralMap(self, filepath):
         raw = np.loadtxt(filepath)
@@ -501,6 +448,85 @@ class FFAG_EField_spiral:
             HitGapIndex,
             tmp_phi, tmp_flag
         )
+
+
+class FFAG_EField_spiral(FFAG_SpiralFieldMap):
+    def __init__(self, freq_curve_path, EnableFlag):
+        header, data = self.ParseEmapFile(freq_curve_path)
+        self.GapType = "spiral"
+        self.acc_phi0 = np.deg2rad(float(header["acc_phi_paint"]))
+        self.gap_width = float(header["gap_width"])
+        self.freq_curve = data
+        self.harmonic = int(header["harmonic"])
+        self.rf_shift = np.deg2rad(np.atleast_1d(header["rf_shift"]).astype(np.float64))
+
+        emap_dir = os.path.dirname(os.path.abspath(freq_curve_path))
+        er_file = header.get("Er_map_file", "Er_coef.txt")
+        ez_file = header.get("Ez_map_file", "Ez_coef.txt")
+        ephi_file = header.get("Ephi_map_file", "Ephi_coef.txt")
+        super().__init__(
+            os.path.join(emap_dir, er_file),
+            os.path.join(emap_dir, ez_file),
+            os.path.join(emap_dir, ephi_file),
+            np.deg2rad(np.atleast_1d(header["gap_azimuth"]).astype(np.float64)),
+            1.0 / self.gap_width, EnableFlag,
+        )
+
+        self.second_harmonic = None
+        if EnableFlag and "second_harmonic_phase_offset_deg" in header:
+            # The second-harmonic map already uses global azimuth, so its gap needs no rotation.
+            self.second_harmonic = FFAG_SpiralFieldMap(
+                os.path.join(emap_dir, header["second_harmonic_Er_map_file"]),
+                os.path.join(emap_dir, header["second_harmonic_Ez_map_file"]),
+                os.path.join(emap_dir, header["second_harmonic_Ephi_map_file"]),
+                np.zeros(1), 1.0, EnableFlag=True,
+            )
+            self.second_harmonic_voltage = float(header["second_harmonic_voltage_V"])
+            self.second_harmonic_phase_offset = np.deg2rad(
+                float(header["second_harmonic_phase_offset_deg"])
+            )
+
+        # --------------------------------------------------
+        # Read orbit intersections with the spiral gap and interpolate them in energy.
+        # --------------------------------------------------
+        self.Ek_gap = np.atleast_1d(header["Ek_gap"]).astype(np.float64)
+        self.r_gap = np.atleast_1d(header["r_gap"]).astype(np.float64)
+        self.phi_gap_deg = np.atleast_1d(header["phi_gap_deg"]).astype(np.float64)
+        self.phi_gap_unwrapped_deg = np.atleast_1d(header["phi_gap_unwrapped_deg"]).astype(np.float64)
+
+        # Convert the azimuths to radians.
+        self.phi_gap = np.deg2rad(self.phi_gap_deg)
+        self.phi_gap_unwrapped = np.deg2rad(self.phi_gap_unwrapped_deg)
+
+        # Sort the header data by ascending energy.
+        sort_idx = np.argsort(self.Ek_gap)
+        self.Ek_gap = self.Ek_gap[sort_idx]
+        self.r_gap = self.r_gap[sort_idx]
+        self.phi_gap = self.phi_gap[sort_idx]
+        self.phi_gap_unwrapped = self.phi_gap_unwrapped[sort_idx]
+
+        # Build a linear interpolator for each set of intersection data.
+        def _make_linear_interp(x_nodes, y_nodes):
+            x_nodes = np.asarray(x_nodes, dtype=np.float64)
+            y_nodes = np.asarray(y_nodes, dtype=np.float64)
+
+            def interp_func(x):
+                x = np.asarray(x, dtype=np.float64)
+                return np.interp(x, x_nodes, y_nodes)
+
+            return interp_func
+
+        self.r_gap_interp = _make_linear_interp(self.Ek_gap, self.r_gap)
+        self.phi_gap_interp_unwrapped = _make_linear_interp(self.Ek_gap, self.phi_gap_unwrapped)
+
+        if MPI.COMM_WORLD.Get_rank() == 0:
+            print(f"[Emap] load spiral Emap from {emap_dir}")
+            # print(f"[Emap] gap azimuths (deg) = {np.rad2deg(self.gap_azimuths)}")
+            # print(f"[Emap] rf_shift (deg)     = {np.rad2deg(self.rf_shift)}")
+            # print(
+            #     f"[Emap] source phi range (deg) = "
+            #     f"[{np.rad2deg(self.map_phimin):.6f}, {np.rad2deg(self.map_phimax):.6f}]"
+            # )
 
     def Interpolation1D_freq_curve(self, time):
         X0_time = self.freq_curve[0, 0]

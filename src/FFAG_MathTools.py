@@ -2137,15 +2137,16 @@ def cylindrical_to_cartesian(r, rdot, z, zdot, fi, fidot,
                              Malloc_vx_cart, Malloc_vy_cart, Malloc_vz_cart,
                              Malloc_Ex_cart, Malloc_Ey_cart, Malloc_Ez_cart,
                              Malloc_Bx_cart, Malloc_By_cart, Malloc_Bz_cart,
-                             Malloc_RF_shift, rf_shift, apply_RF=True):
+                             Malloc_RF_shift, rf_shift, apply_RF=True, fields_are_modulated=False):
 
     N = r.shape[0]
 
     for i in prange(N):
         sinFi = np.sin(fi[i])
         cosFi = np.cos(fi[i])
-        sin_RF = np.sin(RF_Phase[i]+rf_shift[Malloc_RF_shift[i]]) if apply_RF else 0.0
-        # sin_RF = np.sin(np.pi/6) if apply_RF else 0.0
+        sin_RF = 0.0
+        if apply_RF:
+            sin_RF = 1.0 if fields_are_modulated else np.sin(RF_Phase[i] + rf_shift[Malloc_RF_shift[i]])
 
         # 电场处理
         Ez = E_z[i] * sin_RF
@@ -2375,7 +2376,7 @@ def RK4_equations_of_motion_njit(
     q, c, E0_J,
     dxdt, dRF_phase,
     rf_shift, malloc_RFGap_index,
-    apply_RF=False):
+    apply_RF=False, fields_are_modulated=False):
 
     Np = r.shape[0]
     for i in prange(Np):
@@ -2402,7 +2403,9 @@ def RK4_equations_of_motion_njit(
         vperp2 = v2 - rdot[i] ** 2 - zdot[i] ** 2
         fidot = np.sqrt(vperp2) / r[i]
 
-        sin_RF = np.sin(RF_Phase[i]+rf_shift[malloc_RFGap_index[i]]) if apply_RF else 0.0
+        sin_RF = 0.0
+        if apply_RF:
+            sin_RF = 1.0 if fields_are_modulated else np.sin(RF_Phase[i] + rf_shift[malloc_RFGap_index[i]])
 
         # 电场处理
         Ez_tot = E_z[i] * sin_RF
